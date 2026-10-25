@@ -13,9 +13,9 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 업스트림에 없는 새 파일로 더한 기능.
 
 - `FORK.md`: 이 문서. 업스트림 기준 커밋과 포크 변경 목록
-- `tests/test_fork_manifest.py`: 이 문서의 목록과 실제 변경의 일치 검사
+- `tests/test_fork_manifest.py`: 이 문서의 목록과 실제 변경(기준 대비 index와 작업 트리 각각)의 일치 검사. 얕은 clone에서만 skip, 기준 커밋이 없는 일반 clone은 실패
 - `tests/test_fork_identity.py`: 플러그인 이름·업스트림 author 유지, 포크 마켓 이름·owner와 기존 항목 유지 검사
-- `scripts/doctor.py`: 설치 점검. 블로그 레포가 고정한 버전과 실제 실행된 엔진(공유 설정, `claude plugin list --json`, 설치 레지스트리, 태그 커밋), 실행 경로, Python 버전, 런타임 경로를 검사해 JSON으로 출력. 확인할 수 없으면 실패
+- `scripts/doctor.py`: 설치 점검. 블로그 레포가 고정한 버전과 실제 실행된 엔진(공유 설정, `claude plugin list --json`, 설치 레지스트리, 태그 커밋), 실행 경로, Python 버전, 런타임 경로를 검사해 JSON으로 출력. 확인할 수 없으면 실패. 이 블로그 레포의 설치는 레지스트리 `projectPath`로 먼저 골라 다른 레포의 project 설치와 구분하고, 런타임 경로는 기본·활성 Claude 플러그인 폴더 밖이고 폴더(또는 아직 없음)여야 함
 - `skills/blog-doctor/SKILL.md`: 설치된 설치 점검 스크립트를 실행하고 결과를 보여 주는 스킬(`/blog-doctor`). 라우터 명령 표에는 넣지 않음
 - `tests/test_doctor.py`: 스텁 `claude`·`git`과 임시 블로그 레포·레지스트리로 설치 점검의 통과·실패 사례와 비밀 비노출 확인
 - `docs/BLOG-KIT-UPGRADE.md`: 블로그 레포 설정 예시와 설치·업그레이드·다운그레이드 순서, uninstall 금지, 런타임 경로 첫 전환, 보존 확인
@@ -28,32 +28,32 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `.gitignore`: `/flow` 작업 폴더(`.scratch/`)와 외부 도구가 만드는 로컬 전용 Codex용 사본(`/AGENTS.md`, `/.agents/`) 제외
 - `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가
 - `.claude-plugin/marketplace.json`: 마켓 이름 `blog-kit`, owner를 포크 소유자로. 기존 항목(동반 플러그인 포함)은 그대로
-- `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.1`, repository·homepage를 포크 저장소로. 이름·author는 업스트림 그대로
+- `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.N`, repository·homepage를 포크 저장소로. 이름·author는 업스트림 그대로
 - `.github/ISSUE_TEMPLATE/config.yml`: 토론·보안 제보·문서 안내 URL을 포크 저장소로
 - `.github/SECURITY.md`: 보안 제보(Security Advisory) URL을 포크 저장소로
 - `CHANGELOG.md`: 맨 위에 포크 절과 포크 릴리스 항목
-- `CITATION.cff`: 버전 `2.3.1-kit.1`, 저장소를 포크로
+- `CITATION.cff`: 버전 `2.3.1-kit.N`, 저장소를 포크로
 - `LICENSE`: 업스트림 저작권 줄 아래 포크 저작권 줄
 - `README.md`: 맨 위 포크 설치 안내 블록(절차서 링크 포함). 나머지 본문은 업스트림 그대로
-- `pyproject.toml`: 버전 `2.3.1+kit.1`(PEP 440 로컬 버전), 프로젝트 URL을 포크로
+- `pyproject.toml`: 버전 `2.3.1+kit.N`(PEP 440 로컬 버전), 프로젝트 URL을 포크로
 - `scripts/validate_public_release.py`: 업스트림 author 상수와 포크 배포 상수 분리, 버전 대응 규칙 `python_version()`, 독립 설치 스크립트 표면을 필수 검사에서 제외(아래 "릴리스 검사 범위 밖")
-- `skills/blog/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-audio/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-cluster/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-flow/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-google/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-image/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`. MCP 설정 도우미 호출 안내를 `--project-dir "<blog repo>"`로, 쓰는 위치 설명을 `.mcp.json`·`~/.claude.json`으로
-- `skills/blog-locale-audit/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-localize/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-multilingual/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-notebooklm/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-translate/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-image/scripts/setup_image_mcp.py`: 대상 선택을 `--project-dir <블로그 레포>`(그 폴더의 `.mcp.json`)와 `--global`(사용자 범위 MCP를 실제로 읽는 `~/.claude.json`, 다른 키·서버 보존) 둘 중 하나로. 설치본(플러그인 캐시 안)에서 둘 다 없으면 오류로 멈추고 아무것도 쓰지 않음, 개발 체크아웃은 자기 루트 자동 탐색만 허용하고 실패하면 전역으로 넘어가지 않음. 설정·확인·제거가 같은 규칙. 업스트림 `--project`는 대상 없음과 같은 뜻으로 유지
+- `skills/blog/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-audio/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-cluster/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-flow/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-google/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-image/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`. MCP 설정 도우미 호출 안내를 `--project-dir "<blog repo>"`로, 쓰는 위치 설명을 `.mcp.json`·`~/.claude.json`으로
+- `skills/blog-locale-audit/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-localize/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-multilingual/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-notebooklm/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-translate/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog-image/scripts/setup_image_mcp.py`: 대상 선택을 `--project-dir <블로그 레포>`(그 폴더의 `.mcp.json`)와 `--global`(사용자 범위 MCP를 실제로 읽는 `~/.claude.json`, `CLAUDE_CONFIG_DIR`가 있으면 그 폴더의 `.claude.json`. 다른 키·서버 보존, 쓰는 도중 Claude Code가 고치면 다시 읽어 우리 항목만 다시 적용) 둘 중 하나로. 설치본(기본·활성 설정 폴더의 플러그인 폴더 안)에서 둘 다 없으면 오류로 멈추고 아무것도 쓰지 않음, 빈 `--project-dir`도 오류, 개발 체크아웃은 자기 루트 자동 탐색만 허용하고 실패하면 전역으로 넘어가지 않음. 설정·확인·제거가 같은 규칙. 업스트림 `--project`는 대상 없음과 같은 뜻으로 유지
 - `tests/test_skill_frontmatter.py`: 스킬 폴더 수 단언을 업스트림 32개 + `blog-doctor` = 33개로
 - `tests/test_scripts_wave3_image.py`: 기존 전역 설정 테스트를 `~/.claude.json` 기대값과 새 함수 인자로. 임시 HOME·설치본 흉내로 대상 선택 사례(대상 없음·경로·전역·둘 다·자동 탐색 실패·성공, `--project`)를 설정·확인·제거에 대해 확인
 - `tests/test_release_safeguards.py`: 검사기 픽스처를 포크 값으로, 마켓 이름 단언을 `blog-kit`으로. 업스트림 보안 checkout 안내 필수 테스트를 포크 보안 URL·설치 스크립트 제외·author 유지 테스트로 교체
 - `tests/test_version_coherence.py`: 버전 표면 비교를 대응 규칙으로(`2.3.1-kit.N` ↔ `2.3.1+kit.N`, 접미사 없는 형식도 수용), 기준 버전을 plugin.json으로, 임시 폴더 픽스처로 일치·불일치 확인
-- `uv.lock`: 패키지 버전 변경에 따른 재생성(`claude-blog` `2.3.1+kit.1`)
+- `uv.lock`: 패키지 버전 변경에 따른 재생성(`claude-blog` `2.3.1+kit.N`)
 
 ## 작업 파일
 
