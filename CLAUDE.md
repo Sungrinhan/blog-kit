@@ -202,3 +202,17 @@ After cutting a new release (git tag + `gh release create`), run:
 ```
 
 This generates a blog post on https://claude-blog.md/blog/, handles cover image generation, SEO metadata, FAQ schema, internal linking, sitemap/llms.txt updates, and Vercel deployment.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues (`Sungrinhan/blog-kit`), `gh` CLI 사용. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+기본 5개 역할 라벨 그대로(`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+single-context (루트 `GLOSSARY.md` + `docs/adr/`). See `docs/agents/domain.md`.
