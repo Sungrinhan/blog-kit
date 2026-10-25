@@ -105,3 +105,7 @@ definitive-resesarch-blueprint-for-claude-blog.md
 
 # /flow 상태 파일·스펙 초안·승인 대기 파일 (로컬 작업용, 커밋하지 않음)
 .scratch/
+
+# 외부 도구가 만드는 로컬 전용 Codex용 사본 (커밋하지 않음)
+/AGENTS.md
+/.agents/
