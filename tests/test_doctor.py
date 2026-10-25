@@ -181,6 +181,12 @@ def _symlink_into_cache(w: World) -> None:
     _set_runtime(w, str(link))
 
 
+def _runtime_is_a_file(w: World) -> None:
+    path = w.tmp / "runtime-file"
+    path.write_text("not a folder\n")
+    _set_runtime(w, str(path))
+
+
 def _version(w: World, version: str) -> None:
     _ours(w)["version"] = version
     _entry(w)["version"] = version
@@ -188,7 +194,18 @@ def _version(w: World, version: str) -> None:
 
 OTHER_SHA = "d" * 40
 TAG_REF = f"refs/tags/{TAG}"
+def _other_project(w: World, shared_cache: bool) -> None:
+    """The same plugin installed at project scope in another repo too."""
+    other_install = w.install if shared_cache else w.cache / "blog-kit" / "claude-blog" / "2.3.1-kit.0"
+    w.cli.append(dict(_ours(w), installPath=str(other_install)))
+    w.registry_data["plugins"][PLUGIN_ID].append(
+        dict(_entry(w), projectPath=str(w.tmp / "other-repo"), installPath=str(other_install))
+    )
+
+
 PASSING = {
+    "another repo has its own project install": lambda w: _other_project(w, shared_cache=False),
+    "another repo shares the same cached install": lambda w: _other_project(w, shared_cache=True),
     "annotated tag (two lines) compares the peeled commit": lambda w: setattr(
         w, "ls_remote", f"{TAG_OBJECT}\t{TAG_REF}\n{COMMIT}\t{TAG_REF}^{{}}\n"
     ),
@@ -237,7 +254,11 @@ FAILING = {
         lambda w: _entry(w).update(installPath=str(w.tmp / "other")), "c_registry", "fail"),
     "registry entry duplicated": (
         lambda w: w.registry_data["plugins"][PLUGIN_ID].append(dict(_entry(w))), "c_registry", "fail"),
-    "CLI install duplicated": (lambda w: w.cli.append(dict(_ours(w))), "b_cli_install", "fail"),
+    "CLI entries for this install disagree": (
+        lambda w: w.cli.append(dict(_ours(w), enabled=False)), "b_cli_install", "unknown"),
+    "registry has two entries for this blog repo": (
+        lambda w: w.registry_data["plugins"][PLUGIN_ID].append(
+            dict(_entry(w), installPath=str(w.tmp / "second"))), "c_registry", "fail"),
     "registry and CLI versions differ": (lambda w: _entry(w).update(version="2.3.1-kit.2"), "c_registry", "fail"),
     "registry missing": (lambda w: setattr(w, "registry", w.tmp / "nowhere.json"), "c_registry", "unknown"),
     "claude exits nonzero": (lambda w: setattr(w, "claude_rc", 1), "b_cli_install", "unknown"),
@@ -255,6 +276,7 @@ FAILING = {
     "runtime dir inside the plugin cache": (
         lambda w: _set_runtime(w, str(w.cache / "data")), "h_runtime_dir", "fail"),
     "runtime dir reaches the cache through a symlink": (_symlink_into_cache, "h_runtime_dir", "fail"),
+    "runtime dir is an existing regular file": (_runtime_is_a_file, "h_runtime_dir", "fail"),
 }
 
 

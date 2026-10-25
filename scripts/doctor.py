@@ -8,9 +8,10 @@ a  shared settings (.claude/settings.json) enable claude-blog@blog-kit from the
    fork marketplace pinned to a v<version> tag
 b  `claude plugin list --json`, run in the blog repo, shows exactly one enabled
    project-scope install, and no claude-blog from another marketplace is active
-c  the installed-plugins registry holds exactly one entry matching the CLI
-   install (id, scope, installPath), its projectPath is this blog repo, and
-   its version agrees with the CLI
+c  the installed-plugins registry holds exactly one project-scope entry whose
+   projectPath is this blog repo, it connects to the CLI install by id, scope
+   and installPath, and its version agrees with the CLI. Installs of the same
+   plugin in other repos (listed by the CLI too) are told apart this way
 d  the installed version equals the pinned tag without its leading v
 e  the registry commit SHA equals the commit the tag points to on the fork
    (`git ls-remote` of the exact tag ref and its peeled ref)
@@ -73,6 +74,12 @@ def claude_config_dir() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
 
+def _plugin_folders() -> list[Path]:
+    """The default and the active Claude plugin folders (they differ under CLAUDE_CONFIG_DIR)."""
+    folders = {(Path.home() / ".claude" / "plugins").resolve(), (claude_config_dir() / "plugins").resolve()}
+    return sorted(folders)
+
+
 def _same_path(a: str, b: str) -> bool:
     return Path(a).resolve() == Path(b).resolve()
 
@@ -114,6 +121,7 @@ class Doctor:
         self.ref: str | None = None
         self.cli: dict | None = None
         self.entry: dict | None = None
+        self._registry_cache: dict | None = None
 
     def check_a_shared_settings(self) -> dict:
         settings = _read_json(
@@ -173,7 +181,18 @@ class Doctor:
         if not ours:
             raise Fail(f"no project-scope {PLUGIN_ID} install in this blog repo")
         if len(ours) > 1:
-            raise Fail(f"more than one project-scope {PLUGIN_ID} install")
+            # The CLI also lists other repos' project installs. Keep the ones
+            # that share this blog repo's registry install path.
+            try:
+                install = self._registry_entry()["installPath"]
+            except Fail:
+                raise Unknown("several project-scope installs and none is this blog repo's") from None
+            ours = [e for e in ours if _same_path(e["installPath"], install)]
+            if not ours:
+                raise Fail(f"no project-scope {PLUGIN_ID} install connects to this blog repo")
+            distinct = {(e["version"], e["enabled"], str(Path(e["installPath"]).resolve())) for e in ours}
+            if len(distinct) > 1:
+                raise Unknown("CLI entries for this blog repo's install disagree")
         entry = ours[0]
         fields = {"scope": entry["scope"], "enabled": entry["enabled"], "install_path": entry["installPath"]}
         if VERSION_RE.fullmatch(entry["version"]):
@@ -183,29 +202,36 @@ class Doctor:
         self.cli = entry
         return fields
 
+    def _registry_entry(self) -> dict:
+        """This blog repo's project-scope registry entry for the plugin."""
+        if self._registry_cache is None:
+            data = _read_json(self.registry, Unknown("installed-plugins registry not found"), "registry")
+            plugins = data.get("plugins") if isinstance(data, dict) else None
+            entries = plugins.get(PLUGIN_ID, []) if isinstance(plugins, dict) else None
+            if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+                raise Unknown("registry has no plugin list")
+            mine = []
+            for e in entries:
+                if e.get("scope") != "project":
+                    continue
+                for field in ("projectPath", "installPath", "version"):
+                    if not isinstance(e.get(field), str):
+                        raise Unknown(f"registry project entry has no {field}")
+                if _same_path(e["projectPath"], str(self.blog)):
+                    mine.append(e)
+            if not mine:
+                raise Fail("no project-scope registry entry for this blog repo")
+            if len(mine) > 1:
+                raise Fail("more than one registry entry for this blog repo")
+            self._registry_cache = mine[0]
+        return self._registry_cache
+
     def check_c_registry(self) -> dict:
         if self.cli is None:
             raise Unknown("depends on b_cli_install")
-        data = _read_json(self.registry, Unknown("installed-plugins registry not found"), "registry")
-        plugins = data.get("plugins") if isinstance(data, dict) else None
-        entries = plugins.get(PLUGIN_ID, []) if isinstance(plugins, dict) else None
-        if not isinstance(entries, list):
-            raise Unknown("registry has no plugin list")
-        matches = [
-            e for e in entries
-            if isinstance(e, dict) and e.get("scope") == "project"
-            and isinstance(e.get("installPath"), str)
-            and _same_path(e["installPath"], self.cli["installPath"])
-        ]
-        if not matches:
-            raise Fail("no registry entry matches the CLI install (id, scope, installPath)")
-        if len(matches) > 1:
-            raise Fail("more than one registry entry matches the CLI install")
-        entry = matches[0]
-        if not isinstance(entry.get("projectPath"), str) or not isinstance(entry.get("version"), str):
-            raise Unknown("registry entry has no projectPath or version")
-        if not _same_path(entry["projectPath"], str(self.blog)):
-            raise Fail("registry projectPath is not this blog repo")
+        entry = self._registry_entry()
+        if not _same_path(entry["installPath"], self.cli["installPath"]):
+            raise Fail("registry entry and CLI install do not connect (installPath)")
         if entry["version"] != self.cli["version"]:
             raise Fail("registry and CLI disagree on the installed version")
         self.entry = entry
@@ -301,9 +327,11 @@ class Doctor:
                 f"{RUNTIME_VAR} must be an absolute resolved path without parent traversal"
             ) from None
         resolved = Path(configured).resolve()
-        plugins = (claude_config_dir() / "plugins").resolve()
-        if resolved.is_relative_to(plugins):
-            raise Fail(f"{RUNTIME_VAR} resolves inside the Claude plugin folder")
+        if resolved.exists() and not resolved.is_dir():
+            raise Fail(f"{RUNTIME_VAR} exists but is not a folder")
+        for plugins in _plugin_folders():
+            if resolved.is_relative_to(plugins):
+                raise Fail(f"{RUNTIME_VAR} resolves inside the Claude plugin folder")
         return {"runtime_dir": str(resolved)}
 
     def run(self) -> list[dict]:
