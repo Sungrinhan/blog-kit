@@ -577,8 +577,11 @@ def test_consistency_checker_discovers_skill_relative_resources_and_agents(
 
 
 def _public_fixture(root: Path) -> None:
-    public = "https://github.com/AgriciDaniel/claude-blog"
-    version = "2.3.1"
+    # Fork: distribution values are blog-kit's. The plugin author and the
+    # standalone installers (raw URLs, embedded version) stay upstream.
+    public = "https://github.com/Sungrinhan/blog-kit"
+    version = "2.3.1-kit.1"
+    python_version = "2.3.1+kit.1"
     raw_sh = (
         "https://raw.githubusercontent.com/AgriciDaniel/claude-blog/main/install.sh"
     )
@@ -589,7 +592,7 @@ def _public_fixture(root: Path) -> None:
     (root / ".github" / "ISSUE_TEMPLATE").mkdir(parents=True)
     (root / "skills" / "blog").mkdir(parents=True)
     (root / "README.md").write_text(
-        f"{public}\nclaude-blog@agricidaniel-blog\n{raw_sh}\n{raw_ps1}\n"
+        f"{public}\nclaude-blog@blog-kit\n{raw_sh}\n{raw_ps1}\n"
         "git checkout <commit-sha-or-release-tag>\n"
         "CLAUDE_BLOG_REF=<commit-sha-or-release-tag>\n",
         encoding="utf-8",
@@ -604,7 +607,7 @@ def _public_fixture(root: Path) -> None:
     )
     (root / "pyproject.toml").write_text(
         "\n".join(
-            [f'version = "{version}"']
+            [f'version = "{python_version}"']
             + [
                 f'{field} = "{public}{suffix}"'
                 for field, suffix in (
@@ -636,8 +639,8 @@ def _public_fixture(root: Path) -> None:
     (root / ".claude-plugin" / "marketplace.json").write_text(
         json.dumps(
             {
-                "name": "agricidaniel-blog",
-                "owner": {"name": "AgriciDaniel"},
+                "name": "blog-kit",
+                "owner": {"name": "Sungrinhan"},
                 "plugins": [{"name": "claude-blog", "source": "./"}],
             }
         ),
@@ -655,16 +658,17 @@ def _public_fixture(root: Path) -> None:
     )
     (root / ".github" / "SECURITY.md").write_text(
         "Only the latest version is supported.\n"
+        f"Open a [GitHub Security Advisory]({public}/security/advisories/new).\n"
         "Use `git checkout <commit-sha-or-release-tag>` before installation.\n",
         encoding="utf-8",
     )
     (root / "install.sh").write_text(
-        f'{raw_sh}\nCLAUDE_BLOG_VERSION="{version}"\n'
+        f'{raw_sh}\nCLAUDE_BLOG_VERSION="2.3.1"\n'
         'repo="${CLAUDE_BLOG_REPO:-AgriciDaniel/claude-blog}"\n',
         encoding="utf-8",
     )
     (root / "install.ps1").write_text(
-        f'{raw_ps1}\n$ClaudeBlogVersion = "{version}"\n'
+        f'{raw_ps1}\n$ClaudeBlogVersion = "2.3.1"\n'
         '$Repo = "AgriciDaniel/claude-blog"\n',
         encoding="utf-8",
     )
@@ -737,7 +741,7 @@ def test_validator_does_not_depend_on_the_host_plugin_validator() -> None:
     manifest = json.loads((ROOT / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
     marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
     assert manifest["name"] == "claude-blog"
-    assert marketplace["name"] == "agricidaniel-blog"
+    assert marketplace["name"] == "blog-kit"
     assert [entry["name"] for entry in marketplace["plugins"]] == ["claude-blog", "blog-studio"]
     assert "blog-engine" not in json.dumps([manifest, marketplace])
 
@@ -775,29 +779,72 @@ def test_current_public_release_surfaces_pass_validator() -> None:
     assert module.validate(ROOT)["status"] == "pass"
 
 
-def test_public_release_validator_requires_corrected_security_guidance(
+def test_public_release_validator_requires_fork_security_advisory_url(
     tmp_path: Path,
 ) -> None:
-    """SECURITY.md must tell users to pin a reviewed ref, not the v2.2.0 tag."""
+    """Fork: SECURITY.md routes private reports to the fork's advisories."""
     module = _load_module(
-        "release_public_validator_security_version",
+        "release_public_validator_security_routing",
         ROOT / "scripts" / "validate_public_release.py",
     )
     _public_fixture(tmp_path)
     security = tmp_path / ".github" / "SECURITY.md"
     security.write_text(
         security.read_text(encoding="utf-8").replace(
-            "git checkout <commit-sha-or-release-tag>", "git checkout v1.7.0"
+            "https://github.com/Sungrinhan/blog-kit/security",
+            "https://github.com/AgriciDaniel/claude-blog/security",
         ),
         encoding="utf-8",
     )
     report = module.validate(tmp_path)
     assert report["status"] == "fail"
     assert any(
-        error["kind"] == "invalid_public_security_guidance"
+        error["kind"] == "invalid_public_security_routing"
         and error["file"] == ".github/SECURITY.md"
         for error in report["errors"]
     )
+
+
+def test_public_release_validator_excludes_standalone_installer_surfaces(
+    tmp_path: Path,
+) -> None:
+    """Fork: standalone installers are unsupported and keep upstream values.
+
+    Their raw URLs, embedded versions, owner strings, and the ref guidance
+    that pins them are not required; a third-party raw URL still fails.
+    """
+    module = _load_module(
+        "release_public_validator_installer_scope",
+        ROOT / "scripts" / "validate_public_release.py",
+    )
+    _public_fixture(tmp_path)
+    for name in ("install.sh", "install.ps1"):
+        (tmp_path / name).write_text("# upstream standalone installer\n", encoding="utf-8")
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "https://github.com/Sungrinhan/blog-kit\nclaude-blog@blog-kit\n", encoding="utf-8"
+    )
+    (tmp_path / "CLAUDE.md").write_text("developer context\n", encoding="utf-8")
+    (tmp_path / ".github" / "SECURITY.md").write_text(
+        "Open a [GitHub Security Advisory]"
+        "(https://github.com/Sungrinhan/blog-kit/security/advisories/new).\n",
+        encoding="utf-8",
+    )
+    assert module.validate(tmp_path)["errors"] == []
+
+
+def test_public_release_validator_keeps_upstream_plugin_author(tmp_path: Path) -> None:
+    module = _load_module(
+        "release_public_validator_author",
+        ROOT / "scripts" / "validate_public_release.py",
+    )
+    _public_fixture(tmp_path)
+    plugin_path = tmp_path / ".claude-plugin" / "plugin.json"
+    plugin = json.loads(plugin_path.read_text(encoding="utf-8"))
+    plugin["author"] = {"name": "Sungrinhan", "url": "https://github.com/Sungrinhan"}
+    plugin_path.write_text(json.dumps(plugin), encoding="utf-8")
+    report = module.validate(tmp_path)
+    assert {e.get("field") for e in report["errors"]} == {"author.name", "author.url"}
 
 
 def test_security_policy_never_tells_users_to_run_the_preownership_installer() -> None:
@@ -833,7 +880,7 @@ def test_public_release_validator_rejects_private_issue_routing(
     config = tmp_path / ".github" / "ISSUE_TEMPLATE" / "config.yml"
     config.write_text(
         config.read_text(encoding="utf-8").replace(
-            "https://github.com/AgriciDaniel/claude-blog/discussions",
+            "https://github.com/Sungrinhan/blog-kit/discussions",
             "https://github.com/AI-Marketing-Hub/claude-blog/discussions",
         ),
         encoding="utf-8",

@@ -9,7 +9,7 @@ acknowledges, and the design decisions behind dual-use technology choices.
 If you find a security issue, please **do not open a public GitHub issue**.
 Instead:
 
-1. Open a [GitHub Security Advisory](https://github.com/AgriciDaniel/claude-blog/security/advisories/new)
+1. Open a [GitHub Security Advisory](https://github.com/Sungrinhan/blog-kit/security/advisories/new)
    on this repo (preferred), OR contact the maintainer directly via the
    email shown in the GitHub profile linked from `.claude-plugin/plugin.json`
    `author.url`.

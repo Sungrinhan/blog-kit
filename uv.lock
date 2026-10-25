@@ -439,7 +439,7 @@ wheels = [
 
 [[package]]
 name = "claude-blog"
-version = "2.3.1"
+version = "2.3.1+kit.1"
 source = { editable = "." }
 
 [package.optional-dependencies]

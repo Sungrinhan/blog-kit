@@ -1,5 +1,15 @@
 # AI Blog Writing & SEO Optimization Skill for Claude Code (`claude-blog`)
 
+> **blog-kit 포크.** 이 저장소 [`Sungrinhan/blog-kit`](https://github.com/Sungrinhan/blog-kit)는
+> 업스트림 [`AgriciDaniel/claude-blog`](https://github.com/AgriciDaniel/claude-blog)를 원본 그대로 두고
+> 덧붙인 포크다. 플러그인 이름은 `claude-blog` 그대로이고, 마켓은 `blog-kit`(`claude-blog@blog-kit`),
+> 버전은 `2.3.1-kit.N`이다.
+>
+> **지원하는 설치는 하나다.** 블로그 레포의 공유 설정에 마켓 `Sungrinhan/blog-kit`을 릴리스 태그
+> `v<버전>`으로 고정해 등록하고 `claude-blog@blog-kit`을 켠다. 업스트림 마켓 설치, 독립 설치 스크립트
+> (`install.sh`, `install.ps1`)와 아래 업스트림 설치 안내는 이 포크에서 지원하지 않는다.
+> 업스트림 기준 커밋과 포크 변경 목록은 [`FORK.md`](FORK.md)에 있다.
+
 <p align="center">
   <img src="assets/cover-blog.svg" alt="Claude Blog cover: AI blog writing, SEO optimization, AI citation readiness, and a 5-gate delivery contract for Claude Code" width="100%">
 </p>

@@ -5,6 +5,13 @@ This read-only check prevents private raw URLs, private marketplace slugs, and
 membership-only install instructions from leaking into the public mirror.
 Run it against the prepared public worktree, never as a validator for the
 private source tree.
+
+Fork (blog-kit): distribution values (repository, owner, marketplace, version)
+are the fork's, while the plugin author stays upstream. The standalone
+installers are unsupported in the fork and keep upstream values, so their raw
+URLs, embedded versions, owner strings, and ref guidance are not required here.
+Anti-leak checks (private URLs, third-party raw URLs, the v2.2.0 pin) still
+cover every surface. See FORK.md.
 """
 
 from __future__ import annotations
@@ -15,27 +22,30 @@ import re
 import sys
 from pathlib import Path
 
-PUBLIC_REPOSITORY = "https://github.com/AgriciDaniel/claude-blog"
-PUBLIC_VERSION = "2.3.1"
-PUBLIC_PLUGIN_IDENTIFIER = "claude-blog"
-PUBLIC_SLUG = f"{PUBLIC_PLUGIN_IDENTIFIER}@agricidaniel-blog"
-PUBLIC_OWNER = "AgriciDaniel"
-PUBLIC_OWNER_URL = "https://github.com/AgriciDaniel"
-PUBLIC_MARKETPLACE = "agricidaniel-blog"
-PUBLIC_RAW_INSTALL_SH = (
+# Upstream values the fork keeps: the plugin author and the standalone installers.
+UPSTREAM_AUTHOR = "AgriciDaniel"
+UPSTREAM_AUTHOR_URL = "https://github.com/AgriciDaniel"
+UPSTREAM_VERSION = "2.3.1"
+UPSTREAM_RAW_INSTALL_SH = (
     "https://raw.githubusercontent.com/AgriciDaniel/claude-blog/main/install.sh"
 )
-PUBLIC_RAW_INSTALL_PS1 = (
+UPSTREAM_RAW_INSTALL_PS1 = (
     "https://raw.githubusercontent.com/AgriciDaniel/claude-blog/main/install.ps1"
 )
-PUBLIC_PINNED_INSTALL_SH = (
+UPSTREAM_PINNED_INSTALL_SH = (
     f"https://raw.githubusercontent.com/AgriciDaniel/claude-blog/"
-    f"v{PUBLIC_VERSION}/install.sh"
+    f"v{UPSTREAM_VERSION}/install.sh"
 )
+# Fork distribution values.
+PUBLIC_REPOSITORY = "https://github.com/Sungrinhan/blog-kit"
+PUBLIC_VERSION = "2.3.1-kit.1"
+PUBLIC_PLUGIN_IDENTIFIER = "claude-blog"
+PUBLIC_OWNER = "Sungrinhan"
+PUBLIC_MARKETPLACE = "blog-kit"
+PUBLIC_SLUG = f"{PUBLIC_PLUGIN_IDENTIFIER}@{PUBLIC_MARKETPLACE}"
 PUBLIC_DISCUSSIONS = f"{PUBLIC_REPOSITORY}/discussions"
 PUBLIC_SECURITY_ADVISORY = f"{PUBLIC_REPOSITORY}/security/advisories/new"
 PUBLIC_DOCUMENTATION = f"{PUBLIC_REPOSITORY}/tree/main/docs"
-SECURITY_CHECKOUT_GUIDANCE = "git checkout <commit-sha-or-release-tag>"
 PREOWNERSHIP_INSTALLER_PIN_RE = re.compile(
     r"(?:git checkout\s+|CLAUDE_BLOG_REF\s*=\s*[\"']?|/claude-blog/)v2\.2\.0(?:/install\.(?:sh|ps1))?\b"
 )
@@ -87,6 +97,20 @@ RAW_INSTALLER_RE = re.compile(
     r"[^/\s]+/install\.(?:sh|ps1)",
     re.IGNORECASE,
 )
+FORK_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)-kit\.(\d+)")
+
+
+def python_version(plugin_version: str) -> str:
+    """Return the Python package form of a plugin version.
+
+    Fork releases are 2.3.1-kit.N on plugin surfaces and 2.3.1+kit.N in
+    Python metadata (a PEP 440 local version). Any other version, including
+    upstream versions without the suffix, is the same string on both.
+    """
+    match = FORK_VERSION_RE.fullmatch(plugin_version)
+    if match is None:
+        return plugin_version
+    return f"{match.group(1)}+kit.{match.group(2)}"
 
 
 def validate(root: Path) -> dict:
@@ -160,27 +184,10 @@ def validate(root: Path) -> dict:
                 "expected": PUBLIC_REPOSITORY,
             }
         )
-    for expected in (PUBLIC_RAW_INSTALL_SH, PUBLIC_RAW_INSTALL_PS1):
-        if expected not in readme:
-            errors.append(
-                {
-                    "kind": "missing_exact_public_raw_installer",
-                    "file": "README.md",
-                    "expected": expected,
-                }
-            )
-
     version_fragments = {
-        "README.md": (
-            "git checkout <commit-sha-or-release-tag>",
-            "CLAUDE_BLOG_REF=<commit-sha-or-release-tag>",
-        ),
-        "CLAUDE.md": ("CLAUDE_BLOG_REF=<commit-sha-or-release-tag>",),
         "CITATION.cff": (f"version: {PUBLIC_VERSION}",),
-        "pyproject.toml": (f'version = "{PUBLIC_VERSION}"',),
+        "pyproject.toml": (f'version = "{python_version(PUBLIC_VERSION)}"',),
         ".claude-plugin/plugin.json": (f'"version": "{PUBLIC_VERSION}"',),
-        "install.sh": (f'CLAUDE_BLOG_VERSION="{PUBLIC_VERSION}"',),
-        "install.ps1": (f'$ClaudeBlogVersion = "{PUBLIC_VERSION}"',),
         "skills/blog/SKILL.md": (f'version: "{PUBLIC_VERSION}"',),
     }
     for relative, expected_fragments in version_fragments.items():
@@ -208,15 +215,15 @@ def validate(root: Path) -> dict:
             )
 
     citation = contents.get("CITATION.cff", "")
-    # SECURITY.md must give the same pin-a-reviewed-ref guidance as the README
-    # and must never tell users to run the v2.2.0 installer (checked above).
+    # SECURITY.md must route private reports to the fork and must never tell
+    # users to run the v2.2.0 installer (checked above).
     security = contents.get(".github/SECURITY.md", "")
-    if SECURITY_CHECKOUT_GUIDANCE not in security:
+    if PUBLIC_SECURITY_ADVISORY not in security:
         errors.append(
             {
-                "kind": "invalid_public_security_guidance",
+                "kind": "invalid_public_security_routing",
                 "file": ".github/SECURITY.md",
-                "expected": SECURITY_CHECKOUT_GUIDANCE,
+                "expected": PUBLIC_SECURITY_ADVISORY,
             }
         )
 
@@ -245,35 +252,12 @@ def validate(root: Path) -> dict:
                 }
             )
 
-    expected_installer_urls = {
-        "install.sh": PUBLIC_RAW_INSTALL_SH,
-        "install.ps1": PUBLIC_RAW_INSTALL_PS1,
-    }
-    for relative, expected in expected_installer_urls.items():
-        text = contents.get(relative, "")
-        if expected not in text:
-            errors.append(
-                {
-                    "kind": "missing_exact_public_raw_installer",
-                    "file": relative,
-                    "expected": expected,
-                }
-            )
-        if "AgriciDaniel/claude-blog" not in text:
-            errors.append(
-                {
-                    "kind": "invalid_public_installer_owner",
-                    "file": relative,
-                    "expected": "AgriciDaniel/claude-blog",
-                }
-            )
-
     for relative, text in contents.items():
         for found in RAW_INSTALLER_RE.findall(text):
             if found not in {
-                PUBLIC_RAW_INSTALL_SH,
-                PUBLIC_RAW_INSTALL_PS1,
-                PUBLIC_PINNED_INSTALL_SH,
+                UPSTREAM_RAW_INSTALL_SH,
+                UPSTREAM_RAW_INSTALL_PS1,
+                UPSTREAM_PINNED_INSTALL_SH,
             }:
                 errors.append(
                     {
@@ -323,22 +307,22 @@ def validate(root: Path) -> dict:
                     }
                 )
         author = plugin.get("author")
-        if not isinstance(author, dict) or author.get("name") != PUBLIC_OWNER:
+        if not isinstance(author, dict) or author.get("name") != UPSTREAM_AUTHOR:
             errors.append(
                 {
                     "kind": "invalid_public_plugin_ownership",
                     "file": ".claude-plugin/plugin.json",
                     "field": "author.name",
-                    "expected": PUBLIC_OWNER,
+                    "expected": UPSTREAM_AUTHOR,
                 }
             )
-        if not isinstance(author, dict) or author.get("url") != PUBLIC_OWNER_URL:
+        if not isinstance(author, dict) or author.get("url") != UPSTREAM_AUTHOR_URL:
             errors.append(
                 {
                     "kind": "invalid_public_plugin_ownership",
                     "file": ".claude-plugin/plugin.json",
                     "field": "author.url",
-                    "expected": PUBLIC_OWNER_URL,
+                    "expected": UPSTREAM_AUTHOR_URL,
                 }
             )
 

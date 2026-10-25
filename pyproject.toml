@@ -14,7 +14,7 @@ py-modules = []
 
 [project]
 name = "claude-blog"
-version = "2.3.1"
+version = "2.3.1+kit.1"
 description = "AI-powered blog creation and optimization skill for Claude Code"
 readme = "README.md"
 license = {text = "MIT"}
@@ -24,11 +24,11 @@ authors = [
 ]
 
 [project.urls]
-homepage = "https://github.com/AgriciDaniel/claude-blog"
-repository = "https://github.com/AgriciDaniel/claude-blog"
-issues = "https://github.com/AgriciDaniel/claude-blog/issues"
-documentation = "https://github.com/AgriciDaniel/claude-blog/tree/main/docs"
-changelog = "https://github.com/AgriciDaniel/claude-blog/blob/main/CHANGELOG.md"
+homepage = "https://github.com/Sungrinhan/blog-kit"
+repository = "https://github.com/Sungrinhan/blog-kit"
+issues = "https://github.com/Sungrinhan/blog-kit/issues"
+documentation = "https://github.com/Sungrinhan/blog-kit/tree/main/docs"
+changelog = "https://github.com/Sungrinhan/blog-kit/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 core = [

@@ -8,10 +8,10 @@ authors:
   - given-names: Daniel
     family-names: Agrici
     alias: AgriciDaniel
-repository-code: "https://github.com/AgriciDaniel/claude-blog"
+repository-code: "https://github.com/Sungrinhan/blog-kit"
 url: "https://claude-blog.md"
 license: MIT
-version: 2.3.1
+version: 2.3.1-kit.1
 date-released: "2026-10-13"
 keywords:
   - claude-code

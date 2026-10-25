@@ -1,7 +1,7 @@
 {
-  "name": "agricidaniel-blog",
+  "name": "blog-kit",
   "owner": {
-    "name": "AgriciDaniel"
+    "name": "Sungrinhan"
   },
   "metadata": {
     "description": "Blog creation and optimization tools for Claude Code"
