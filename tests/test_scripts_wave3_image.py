@@ -225,11 +225,12 @@ def _snapshot(*roots: Path) -> dict[str, bytes]:
     }
 
 
-def _run_target(world, script: Path, op: str, *target: str, cwd: Path | None = None):
+def _run_target(world, script: Path, op: str, *target: str, cwd: Path | None = None, env_extra=None):
     args = [a.replace("KEYFILE", str(world["key"])) for a in OPS[op]]
     env = dict(os.environ, HOME=str(world["home"]))
     for name in ("GOOGLE_AI_API_KEY", "CLAUDE_CONFIG_DIR"):
         env.pop(name, None)
+    env.update(env_extra or {})
     result = subprocess.run(
         [sys.executable, str(script), *args, *target, "--json"],
         capture_output=True, text=True, env=env, cwd=cwd or world["blog"],
@@ -336,3 +337,101 @@ def test_upstream_project_flag_follows_the_no_target_rule(world, op):
     assert _snapshot(world["tmp"]) == before
     result, payload = _run_target(world, world["installed"], op, "--project", "--global")
     assert result.returncode != 0 and payload["status"] == "error"
+
+
+
+@pytest.mark.parametrize("op", sorted(OPS))
+def test_empty_project_dir_is_an_error_not_a_missing_flag(world, op):
+    checkout = world["tmp"] / "checkout"
+    script = _plugin_root(checkout)
+    before = _snapshot(world["tmp"])
+    for target in (("--project-dir", "", "--global"), ("--project-dir", "")):
+        result, payload = _run_target(world, script, op, *target, cwd=checkout)
+        assert result.returncode != 0 and payload["status"] == "error", target
+    assert _snapshot(world["tmp"]) == before
+
+
+def test_global_follows_the_active_claude_config_dir(world):
+    profile = world["tmp"] / "profile"
+    profile.mkdir()
+    default_state = (world["home"] / ".claude.json").read_bytes()
+    result, payload = _run_target(
+        world, world["installed"], "setup", "--global", env_extra={"CLAUDE_CONFIG_DIR": str(profile)}
+    )
+    assert result.returncode == 0, result.stdout
+    assert payload["config"] == str(profile / ".claude.json")
+    assert "nanobanana-mcp" in json.loads((profile / ".claude.json").read_text())["mcpServers"]
+    assert (world["home"] / ".claude.json").read_bytes() == default_state
+
+
+@pytest.mark.parametrize("op", sorted(OPS))
+def test_installed_copy_is_recognised_under_another_claude_config_dir(world, op):
+    profile = world["tmp"] / "profile"
+    profile.mkdir()
+    before = _snapshot(world["tmp"])
+    result, payload = _run_target(
+        world, world["installed"], op, env_extra={"CLAUDE_CONFIG_DIR": str(profile)}
+    )
+    assert result.returncode != 0 and payload["status"] == "error"
+    assert _snapshot(world["tmp"]) == before
+
+
+@pytest.mark.parametrize("op", ["setup", "remove"])
+def test_global_write_keeps_a_concurrent_change_made_after_the_first_read(setup, tmp_path, monkeypatch, op):
+    """Claude Code may rewrite ~/.claude.json while the helper runs."""
+    target = tmp_path / ".claude.json"
+    servers = {"nanobanana-mcp": {"command": "npx"}} if op == "remove" else {}
+    target.write_text(json.dumps({"numStartups": 1, "mcpServers": servers}))
+    real_load = setup.load_config
+    calls = {"n": 0}
+
+    def load_then_host_writes(path):
+        config = real_load(path)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            newer = json.loads(target.read_text())
+            newer["numStartups"] = 2
+            newer["mcpServers"]["host-added"] = {"command": "x"}
+            target.write_text(json.dumps(newer))
+        return config
+
+    monkeypatch.setattr(setup, "load_config", load_then_host_writes)
+    if op == "setup":
+        setup.setup_mcp(GOOGLE_KEY, target, True, True)
+    else:
+        setup.remove_mcp(target, True)
+    final = json.loads(target.read_text())
+    assert final["numStartups"] == 2
+    assert "host-added" in final["mcpServers"]
+    assert ("nanobanana-mcp" in final["mcpServers"]) is (op == "setup")
+
+
+def test_first_creation_does_not_overwrite_a_file_created_meanwhile(setup, tmp_path, monkeypatch):
+    """The state file is missing at first, then the host creates it while we write."""
+    target = tmp_path / ".claude.json"
+    real_open = setup._open_temp_no_follow
+    calls = {"n": 0}
+
+    def host_creates_then_open(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            target.write_text(json.dumps({"numStartups": 7, "mcpServers": {"host-added": {"command": "x"}}}))
+        return real_open(path)
+
+    monkeypatch.setattr(setup, "_open_temp_no_follow", host_creates_then_open)
+    setup.setup_mcp(GOOGLE_KEY, target, True, True)
+    final = json.loads(target.read_text())
+    assert final["numStartups"] == 7
+    assert set(final["mcpServers"]) == {"host-added", "nanobanana-mcp"}
+
+
+@pytest.mark.parametrize("op", sorted(OPS))
+def test_copy_installed_under_one_custom_profile_is_recognised_from_another(world, op):
+    profile_a = world["tmp"] / "profile-a"
+    installed = _plugin_root(profile_a / "plugins" / "cache" / "blog-kit" / "claude-blog" / "2.3.1-kit.1")
+    profile_b = world["tmp"] / "profile-b"
+    profile_b.mkdir()
+    before = _snapshot(world["tmp"])
+    result, payload = _run_target(world, installed, op, env_extra={"CLAUDE_CONFIG_DIR": str(profile_b)})
+    assert result.returncode != 0 and payload["status"] == "error"
+    assert _snapshot(world["tmp"]) == before

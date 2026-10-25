@@ -8,8 +8,10 @@ use the same rule.
 
 - --project-dir <blog repo>: that folder's project .mcp.json (env-expansion
   only, never a literal key).
-- --global: the user-scope MCP servers in ~/.claude.json, the file Claude Code
-  reads user-scope servers from. Other keys and servers in it are preserved.
+- --global: the user-scope MCP servers in ~/.claude.json (or
+  $CLAUDE_CONFIG_DIR/.claude.json when that is set), the file Claude Code reads
+  user-scope servers from. Other keys and servers in it are preserved, and a
+  change Claude Code makes to it while this runs is re-read, not overwritten.
 
 With neither, an installed copy (inside the Claude plugin cache) refuses and
 writes nothing. A development checkout may use its own checkout root
@@ -50,7 +52,7 @@ DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
 PINNED_PACKAGE = "@ycse/nanobanana-mcp@1.1.1"
 ENV_PLACEHOLDER = "${GOOGLE_AI_API_KEY}"
 PLUGIN_NAME = "claude-blog"
-GLOBAL_MCP_PATH = Path.home() / ".claude.json"
+MAX_UPDATE_ATTEMPTS = 5
 PLACEHOLDER_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 # Google API keys start with AIza and are 39 characters long.
 GOOGLE_KEY_RE = re.compile(r"AIza[0-9A-Za-z_\-]{35}")
@@ -94,11 +96,27 @@ def find_project_mcp_json() -> Path:
     return None
 
 
+def global_mcp_path() -> Path:
+    """The Claude state file that holds user-scope MCP servers."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(config_dir) / ".claude.json" if config_dir else Path.home() / ".claude.json"
+
+
 def running_from_plugin_cache() -> bool:
-    """Return True when this script is an installed copy in the plugin cache."""
-    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    cache = (config_dir / "plugins").resolve()
-    return Path(__file__).resolve().is_relative_to(cache)
+    """Return True when this script is an installed copy under a Claude plugin folder.
+
+    Both the default folder and the active CLAUDE_CONFIG_DIR one count, and so
+    does any path shaped like a plugin cache (.../plugins/cache/...), so a copy
+    installed under one custom profile is still recognised from another.
+    """
+    folders = [Path.home() / ".claude" / "plugins"]
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        folders.append(Path(os.environ["CLAUDE_CONFIG_DIR"]) / "plugins")
+    here = Path(__file__).resolve()
+    if any(here.is_relative_to(folder.resolve()) for folder in folders):
+        return True
+    parts = here.parts
+    return any(parts[i:i + 2] == ("plugins", "cache") for i in range(len(parts) - 1))
 
 
 def resolve_target(project_dir: str | None, use_global: bool) -> tuple[Path, bool]:
@@ -109,11 +127,13 @@ def resolve_target(project_dir: str | None, use_global: bool) -> tuple[Path, boo
     checkout cannot find its own root.
     """
     hint = "Pass --project-dir <blog repo> or --global. Nothing was written."
-    if project_dir and use_global:
+    if project_dir is not None and use_global:
         raise ValueError(f"Use either --project-dir or --global, not both. {hint}")
     if use_global:
-        return GLOBAL_MCP_PATH, True
-    if project_dir:
+        return global_mcp_path(), True
+    if project_dir is not None:
+        if not project_dir.strip():
+            raise ValueError("--project-dir is empty. Nothing was written.")
         folder = Path(project_dir).expanduser().resolve()
         if not folder.is_dir():
             raise ValueError(f"--project-dir is not a folder: {folder}. Nothing was written.")
@@ -252,8 +272,29 @@ def _open_temp_no_follow(path: Path) -> tuple[int, Path]:
     raise FileExistsError(f"Could not create a unique temp file for {path}")
 
 
-def save_config(path: Path, config: dict, quiet: bool = False) -> None:
-    """Save config file. Sets restrictive permissions if the file may contain secrets."""
+class ConfigChanged(Exception):
+    """The config file changed on disk between reading it and replacing it."""
+
+
+UNCHECKED = object()  # save_config default: no concurrent-change check
+
+
+def _stat_key(path: Path):
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def save_config(path: Path, config: dict, quiet: bool = False, expected=UNCHECKED) -> None:
+    """Save config file. Sets restrictive permissions if the file may contain secrets.
+
+    With expected (a _stat_key taken before reading, None when the file did
+    not exist), refuse to replace a file that changed since, so a concurrent
+    writer's update is not lost. A file expected to be new is created with a
+    hard link, which fails instead of overwriting one created meanwhile.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     _verify_not_symlink(path)
     fd, tmp_path = _open_temp_no_follow(path)
@@ -264,7 +305,16 @@ def save_config(path: Path, config: dict, quiet: bool = False) -> None:
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, path)
+        if expected is not UNCHECKED and _stat_key(path) != expected:
+            raise ConfigChanged(str(path))
+        if expected is None:
+            try:
+                os.link(tmp_path, path)
+            except FileExistsError:
+                raise ConfigChanged(str(path)) from None
+            tmp_path.unlink()
+        else:
+            os.replace(tmp_path, path)
         os.chmod(path, 0o600)
     except Exception:
         try:
@@ -274,6 +324,30 @@ def save_config(path: Path, config: dict, quiet: bool = False) -> None:
         raise
     if not quiet:
         print(f"Config saved to {path}")
+
+
+def update_config(path: Path, mutate, quiet: bool = False) -> bool:
+    """Read, mutate and write path, re-reading if it changes underneath.
+
+    mutate(config) edits only this helper's own entry and returns True when a
+    write is needed. Returns whether the file was written.
+    """
+    for _ in range(MAX_UPDATE_ATTEMPTS):
+        before = _stat_key(path)
+        config = load_config(path)
+        if not mutate(config):
+            return False
+        if _stat_key(path) != before:
+            continue
+        try:
+            save_config(path, config, quiet=quiet, expected=before)
+        except ConfigChanged:
+            continue
+        return True
+    raise ValueError(
+        f"{path} kept changing while it was being updated (is Claude Code writing it?). "
+        "Nothing was written; rerun the command."
+    )
 
 
 def _mask_api_key(key: str) -> str:
@@ -358,12 +432,15 @@ def check_setup(path: Path, use_global: bool, as_json: bool = False) -> bool:
 
 def remove_mcp(path: Path, as_json: bool = False) -> None:
     """Remove MCP configuration from the selected target."""
-    config = load_config(path)
-    servers = config.get("mcpServers", {})
-    if MCP_NAME in servers:
+    def drop(config: dict) -> bool:
+        servers = config.get("mcpServers", {})
+        if MCP_NAME not in servers:
+            return False
         del servers[MCP_NAME]
         config["mcpServers"] = servers
-        save_config(path, config, quiet=as_json)
+        return True
+
+    if update_config(path, drop, quiet=as_json):
         if as_json:
             print(json.dumps({"status": "success", "removed": True, "path": str(path)}, indent=2))
         else:
@@ -404,21 +481,22 @@ def setup_mcp(api_key: str, path: Path, use_global: bool, as_json: bool = False)
             print("  2. Use --global to write to ~/.claude.json instead.")
             sys.exit(2)
 
-    config = load_config(path)
-    config.setdefault("mcpServers", {})
-
     # Project mode: env-expansion only. Global mode: literal value (file is user-private + chmod 600).
     key_value = ENV_PLACEHOLDER if not use_global else api_key
 
-    config["mcpServers"][MCP_NAME] = {
-        "command": "npx",
-        "args": ["-y", PINNED_PACKAGE],
-        "env": {
-            "GOOGLE_AI_API_KEY": key_value,
-            "NANOBANANA_MODEL": DEFAULT_MODEL,
-        },
-    }
-    save_config(path, config, quiet=as_json)
+    def put(config: dict) -> bool:
+        config.setdefault("mcpServers", {})
+        config["mcpServers"][MCP_NAME] = {
+            "command": "npx",
+            "args": ["-y", PINNED_PACKAGE],
+            "env": {
+                "GOOGLE_AI_API_KEY": key_value,
+                "NANOBANANA_MODEL": DEFAULT_MODEL,
+            },
+        }
+        return True
+
+    update_config(path, put, quiet=as_json)
 
     result = {
         "status": "success",
@@ -487,7 +565,7 @@ def main() -> None:
     args = parser.parse_args()
     # Fork: one explicit target, resolved before any key is read or file written.
     try:
-        if args.project and (args.project_dir or args.global_scope):
+        if args.project and (args.project_dir is not None or args.global_scope):
             raise ValueError(
                 "Use only one of --project, --project-dir or --global. Nothing was written."
             )

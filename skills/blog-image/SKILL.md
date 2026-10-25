@@ -336,7 +336,8 @@ image capability configuration, and it needs the user's explicit yes first.
    - `--project-dir` writes that folder's `.mcp.json` (env-expansion only,
      refuses to write a literal key into a tracked file)
    - `--global` instead writes the user-scope MCP servers in `~/.claude.json`
-     (mode 0600; other keys and servers kept). Use one of the two, never both
+     (or `$CLAUDE_CONFIG_DIR/.claude.json`; mode 0600; other keys and servers
+     kept). Use one of the two, never both
    - Without either, an installed copy refuses and writes nothing
    - `--check` and `--remove` take the same `--project-dir` or `--global`
 2. Verify: `python3 "$BLOG_SKILLS_DIR/blog-image/scripts/validate_image_setup.py"`
