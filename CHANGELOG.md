@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Added
 
 - 설치 점검 `/blog-doctor`(`scripts/doctor.py`): 블로그 레포가 고정한 태그·버전·커밋과 실제 실행된 엔진, 실행 경로, Python, 런타임 경로(`CLAUDE_BLOG_RUNTIME_DIR`)를 검사해 JSON으로 출력. 확인할 수 없으면 실패.
+- 설치·업그레이드·다운그레이드 절차서(`docs/BLOG-KIT-UPGRADE.md`)와 사람 검증 기록 양식(`docs/BLOG-KIT-HUMAN-CHECK.md`). `FORK.md`에 지원 설치 경로, 업스트림 병합 절차, 보안 수정 규칙, M2a 상태 정의, 런타임 데이터 형식 유지 규칙.
 
 #### Changed
 

@@ -18,6 +18,8 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `scripts/doctor.py`: 설치 점검. 블로그 레포가 고정한 버전과 실제 실행된 엔진(공유 설정, `claude plugin list --json`, 설치 레지스트리, 태그 커밋), 실행 경로, Python 버전, 런타임 경로를 검사해 JSON으로 출력. 확인할 수 없으면 실패
 - `skills/blog-doctor/SKILL.md`: 설치된 설치 점검 스크립트를 실행하고 결과를 보여 주는 스킬(`/blog-doctor`). 라우터 명령 표에는 넣지 않음
 - `tests/test_doctor.py`: 스텁 `claude`·`git`과 임시 블로그 레포·레지스트리로 설치 점검의 통과·실패 사례와 비밀 비노출 확인
+- `docs/BLOG-KIT-UPGRADE.md`: 블로그 레포 설정 예시와 설치·업그레이드·다운그레이드 순서, uninstall 금지, 런타임 경로 첫 전환, 보존 확인
+- `docs/BLOG-KIT-HUMAN-CHECK.md`: 두 기기 설치·전환 사람 검증 기록 양식과 단계별 기대 설치 점검 결과
 
 ## 포크 수정
 
@@ -32,7 +34,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `CHANGELOG.md`: 맨 위에 포크 절과 포크 릴리스 항목
 - `CITATION.cff`: 버전 `2.3.1-kit.1`, 저장소를 포크로
 - `LICENSE`: 업스트림 저작권 줄 아래 포크 저작권 줄
-- `README.md`: 맨 위 포크 설치 안내 블록. 나머지 본문은 업스트림 그대로
+- `README.md`: 맨 위 포크 설치 안내 블록(절차서 링크 포함). 나머지 본문은 업스트림 그대로
 - `pyproject.toml`: 버전 `2.3.1+kit.1`(PEP 440 로컬 버전), 프로젝트 URL을 포크로
 - `scripts/validate_public_release.py`: 업스트림 author 상수와 포크 배포 상수 분리, 버전 대응 규칙 `python_version()`, 독립 설치 스크립트 표면을 필수 검사에서 제외(아래 "릴리스 검사 범위 밖")
 - `skills/blog/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
@@ -74,3 +76,33 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - 독립 설치 스크립트(`install.sh`, `install.ps1`)의 raw URL, 내장 버전 문자열(업스트림 `2.3.1`), 저장소 owner 문자열: 포크에서 지원하지 않는 설치 경로이고, 고치면 README의 고정 해시와 업스트림 병합이 함께 흔들린다.
 - README·CLAUDE.md·SECURITY.md의 설치 ref 안내(`CLAUDE_BLOG_REF`, `git checkout <commit-sha-or-release-tag>`): 위 독립 설치 경로의 안내다.
 - 그대로 남는 검사: 비공개·제3자 raw URL과 마켓 slug 유출 금지, `v2.2.0` 설치 고정 금지. 업스트림 raw 설치 URL은 허용 목록에 남는다.
+
+## 지원 설치 경로
+
+- **지원**: 블로그 레포 마켓 설치 하나. 블로그 레포의 공유 설정 `.claude/settings.json`에 마켓 `Sungrinhan/blog-kit`을 `ref: v<버전>` 태그로 고정하고, 그 레포에서 `claude-blog@blog-kit`을 project 범위로 설치한다. 절차는 [`docs/BLOG-KIT-UPGRADE.md`](docs/BLOG-KIT-UPGRADE.md).
+- **미지원**: 독립 설치 스크립트(`install.sh`, `install.ps1`, `uninstall.*`), 업스트림 마켓(`claude-blog@agricidaniel-blog`) 설치, user 범위 설치, 브랜치나 커밋 SHA로 고정한 마켓. 업스트림 문서의 설치 안내는 업스트림 본문 그대로 두지만 이 포크에서는 따르지 않는다.
+- 태그는 `v<플러그인 버전>`이고, 한 번 push한 태그는 다시 지정하지 않는다. 고칠 것이 있으면 다음 `kit.N`으로 새 태그를 만든다.
+
+## 업스트림 병합 절차
+
+1. **기준 SHA 기록**: 가져올 업스트림 커밋 SHA를 정하고, 병합 전 이 문서의 "업스트림 기준 커밋"과 비교할 수 있게 적어 둔다.
+2. **병합**: `git fetch upstream` 뒤 그 SHA를 병합한다. 충돌은 위 "포크 수정" 목록의 파일에서 난다. 목록의 이유를 보고 포크 의도를 유지하며 푼다.
+3. **문서 갱신**: "업스트림 기준 커밋"을 새 SHA로 바꾸고, 병합으로 생기거나 없어진 포크 수정을 목록에 반영한다. 업스트림이 고친 파일을 포크가 더 고치지 않았다면 목록에 넣지 않는다.
+4. **전체 자동 검증**: 깨끗한 작업 트리에서 pytest 전체, 스킬 검증, 산문 린트, 릴리스 검사기, `uv lock --check`, 플러그인 검증(예약 이름 오류 1건은 정상)이 모두 통과해야 한다.
+5. **버전 증가**: 업스트림 버전이 바뀌었으면 `<새 업스트림 버전>-kit.1`, 그대로면 `kit.N`을 하나 올린다("버전 체계"). CHANGELOG 포크 절에 항목을 더한다.
+6. **태그·push**: 사람 작업 티켓으로 그 커밋에 `v<버전>` 태그를 만들고 origin에 push한다.
+7. **블로그 레포 ref 변경**: 블로그 레포 공유 설정의 `ref`를 새 태그로 바꿔 커밋하고, 절차서 3절 순서로 전환한다.
+8. **두 기기 설치 점검**: 두 기기 모두 설치 점검이 전부 `ok`인지 확인하고 결과를 사람 작업 티켓에 남긴다.
+
+**보안 수정은 릴리스 주기와 무관하게 바로 가져온다.** 업스트림 보안 수정(보안 권고, 취약점 수정 커밋)은 다른 업스트림 변경을 기다리지 않고 위 절차로 바로 병합하고 `kit.N`을 올려 배포한다.
+
+## M2a 상태
+
+- **구현 완료**: 커밋 A(`2.3.1-kit.1`)와 커밋 B(`2.3.1-kit.2`)가 있고, 각각 깨끗한 작업 트리에서 전체 자동 검증(위 병합 절차 4번과 같은 목록)이 통과했다.
+- **사람 검증 대기**: 사람 작업 티켓(태그, push, 블로그 레포 설정, 두 기기 전환 확인)이 열려 있다. 이 동안 M2b를 시작할 수 있다.
+- **검증 완료**: 두 기기 모두 네 단계(A 설치, B 업그레이드, A 다운그레이드, B 복귀) 설치 점검이 전부 `ok`이고, 매 단계 표식 파일 해시가 같으며 runner 오프라인 확인이 통과한 증거가 사람 작업 티켓에 있다.
+- M2c의 최종 판정은 검증 완료된 ref로만 한다.
+
+## 런타임 데이터 형식
+
+M2a 동안 런타임 데이터(`CLAUDE_BLOG_RUNTIME_DIR` 아래 통합별 `.venv`·`data`, 그 안의 인증·라이브러리·브라우저 상태)의 형식과 폴더 구조를 바꾸지 않는다. 업스트림의 런타임 회귀 테스트(`tests/test_runtime_state.py`, `tests/test_runtime_fixes.py`, `tests/test_final_review_runtime_fixes.py`, `tests/test_notebooklm_wave3.py`)를 고치지 않고 유지하는 것이 이 규칙의 근거다. 그래서 A와 B 사이를 오가도 같은 런타임 폴더를 그대로 쓸 수 있다.

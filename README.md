@@ -8,6 +8,7 @@
 > **지원하는 설치는 하나다.** 블로그 레포의 공유 설정에 마켓 `Sungrinhan/blog-kit`을 릴리스 태그
 > `v<버전>`으로 고정해 등록하고 `claude-blog@blog-kit`을 켠다. 업스트림 마켓 설치, 독립 설치 스크립트
 > (`install.sh`, `install.ps1`)와 아래 업스트림 설치 안내는 이 포크에서 지원하지 않는다.
+> 설치·업그레이드·다운그레이드 절차는 [`docs/BLOG-KIT-UPGRADE.md`](docs/BLOG-KIT-UPGRADE.md),
 > 업스트림 기준 커밋과 포크 변경 목록은 [`FORK.md`](FORK.md)에 있다.
 
 <p align="center">
