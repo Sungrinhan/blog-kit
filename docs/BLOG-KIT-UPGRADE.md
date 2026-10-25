@@ -96,11 +96,18 @@ blog-kit(포크)이 지원하는 설치는 하나다: 블로그 레포의 공유
 전환이 런타임 데이터를 건드리지 않았는지 전환마다 기록한다.
 
 - **표식 파일**: 첫 설치 직후 `<runtime root>/blog-kit-marker.txt`에 비어 있지 않은 가짜 내용(예: `blog-kit marker 1`)을 둔다. 실제 비밀이나 개인 정보를 넣지 않는다. 전환마다 `shasum -a 256 "<runtime root>/blog-kit-marker.txt"`의 결과가 처음과 같은지 기록한다.
-- **runner 오프라인 확인**: 통합마다 네트워크 없이 도는 확인이 통과하는지 기록한다.
+- **runner 오프라인 확인**: 통합마다 네트워크 없이 도는 확인이 통과하는지 기록한다. `setup_environment.py --check --json`은 폴더와 의존성 표식만 보고, `run.py --help`는 가상환경을 보기 전에 끝나므로 그것만으로는 부족하다. 아래처럼 `run.py`에 실제 스크립트를 넘겨 새 위치의 가상환경 Python이 그 스크립트의 도움말을 실행하는지(종료 코드 0) 확인한다. 가상환경이 없거나 의존성이 맞지 않으면 runner가 설치하지 않고 실패한다.
 
   ```bash
-  CLAUDE_BLOG_RUNTIME_DIR="<runtime root>" python3 "<installPath>/skills/<integration>/scripts/setup_environment.py" --check --json
-  CLAUDE_BLOG_RUNTIME_DIR="<runtime root>" python3 "<installPath>/skills/<integration>/scripts/run.py" --help
+  R="<runtime root>"; I="<installPath>/skills"
+  CLAUDE_BLOG_RUNTIME_DIR="$R" python3 "$I/blog-audio/scripts/setup_environment.py" --check --json
+  CLAUDE_BLOG_RUNTIME_DIR="$R" python3 "$I/blog-audio/scripts/run.py" generate_audio.py --help
+  CLAUDE_BLOG_RUNTIME_DIR="$R" python3 "$I/blog-google/scripts/setup_environment.py" --check --json
+  CLAUDE_BLOG_RUNTIME_DIR="$R" python3 "$I/blog-google/scripts/run.py" google_auth.py --help
+  CLAUDE_BLOG_RUNTIME_DIR="$R" python3 "$I/blog-notebooklm/scripts/setup_environment.py" --check --json
+  CLAUDE_BLOG_RUNTIME_DIR="$R" python3 "$I/blog-notebooklm/scripts/run.py" notebook_manager.py --help
   ```
+
+  쓰지 않는 통합(setup을 한 적 없는 통합)은 "setup 안 함"으로 기록한다.
 
 기록 양식은 [`BLOG-KIT-HUMAN-CHECK.md`](BLOG-KIT-HUMAN-CHECK.md)에 있다.
