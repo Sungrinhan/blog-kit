@@ -4,7 +4,8 @@ FORK.md records the upstream base commit and three lists (additions, fork
 patches, work files). Every path that differs from the base in the working
 tree (committed, staged, unstaged, or untracked but not ignored) must appear
 in exactly one list, and nothing else may. Upstream files must never be
-deleted or renamed. A clone without the base commit skips the check.
+deleted or renamed. A shallow clone without the base commit skips the check;
+in a full clone an unknown base commit fails it.
 
 Stdlib + pytest only. No network: fixtures are local temp git repos.
 """
@@ -53,22 +54,27 @@ def _fork_doc(root: Path) -> tuple[str, dict[str, list[str]]]:
 
 
 def _changes(root: Path, base: str) -> tuple[set[str], dict[str, str]]:
-    """Return (paths changed since base, upstream path -> deletion or rename problem)."""
-    fields = _git(root, "diff", "--name-status", "-M", "-z", base).split("\0")
+    """Return (paths changed since base, upstream path -> deletion or rename problem).
+
+    The index and the working tree are compared with base separately, so a
+    staged change still counts after the working tree is restored.
+    """
     changed: set[str] = set()
     removed: dict[str, str] = {}
-    i = 0
-    while i < len(fields) - 1:
-        status, path = fields[i], fields[i + 1]
-        if status.startswith("R"):
-            removed[path] = f"upstream file renamed: {path} -> {fields[i + 2]}"
-            i += 3
-            continue
-        if status == "D":
-            removed[path] = f"upstream file deleted: {path}"
-        else:
-            changed.add(path)
-        i += 2
+    for staged in ((), ("--cached",)):
+        fields = _git(root, "diff", *staged, "--name-status", "-M", "-z", base).split("\0")
+        i = 0
+        while i < len(fields) - 1:
+            status, path = fields[i], fields[i + 1]
+            if status.startswith("R"):
+                removed[path] = f"upstream file renamed: {path} -> {fields[i + 2]}"
+                i += 3
+                continue
+            if status == "D":
+                removed[path] = f"upstream file deleted: {path}"
+            else:
+                changed.add(path)
+            i += 2
     untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
     changed.update(p for p in untracked.split("\0") if p)
     return changed, removed
@@ -81,7 +87,9 @@ def fork_manifest_problems(root: Path) -> list[str]:
         capture_output=True, check=False,
     )
     if probe.returncode != 0:
-        raise BaseUnavailable(base)
+        if _git(root, "rev-parse", "--is-shallow-repository").strip() == "true":
+            raise BaseUnavailable(base)
+        return [f"upstream base commit not found: {base}"]
     listed = [path for paths in lists.values() for path in paths]
     problems = [f"listed twice: {p}" for p in sorted({p for p in listed if listed.count(p) > 1})]
     changed, removed = _changes(root, base)
@@ -192,3 +200,18 @@ def test_clone_without_the_base_commit_is_reported_unavailable(upstream, tmp_pat
 def test_codex_local_copies_are_ignored() -> None:
     ignored = _git(ROOT, "check-ignore", "--no-index", "AGENTS.md", ".agents/skills/flow/SKILL.md")
     assert ignored.split() == ["AGENTS.md", ".agents/skills/flow/SKILL.md"]
+
+
+def test_staged_change_counts_even_when_the_working_tree_is_restored(upstream) -> None:
+    repo, base = upstream
+    (repo / FORK_DOC).write_text(_fork_doc_text(base))
+    (repo / "upstream.txt").write_text("patched\n")
+    _git(repo, "add", "upstream.txt")
+    (repo / "upstream.txt").write_text("upstream\n")
+    assert fork_manifest_problems(repo) == ["changed but not listed: upstream.txt"]
+
+
+def test_unknown_base_in_a_full_clone_fails_instead_of_skipping(upstream) -> None:
+    repo, _ = upstream
+    (repo / FORK_DOC).write_text(_fork_doc_text("0" * 40))
+    assert fork_manifest_problems(repo) == [f"upstream base commit not found: {'0' * 40}"]
