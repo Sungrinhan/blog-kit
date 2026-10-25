@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### [2.3.1-kit.1] - 2026-10-25
 
+#### Added
+
+- 설치 점검 `/blog-doctor`(`scripts/doctor.py`): 블로그 레포가 고정한 태그·버전·커밋과 실제 실행된 엔진, 실행 경로, Python, 런타임 경로(`CLAUDE_BLOG_RUNTIME_DIR`)를 검사해 JSON으로 출력. 확인할 수 없으면 실패.
+
 #### Changed
 
 - 포크 이름·버전으로 배포: 마켓 `blog-kit`(owner Sungrinhan), 플러그인 `claude-blog@blog-kit`, 버전 `2.3.1-kit.1`(Python 패키지 `2.3.1+kit.1`). 플러그인 이름과 author는 업스트림 그대로.
