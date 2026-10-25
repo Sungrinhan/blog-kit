@@ -40,7 +40,7 @@ This skill spends the user's Google AI credit and writes image files.
   `gemini-3.1-flash-image` at $0.067 (1K). Re-read it before quoting a number.
 - **What it writes:** `hero.<ext>` and `hero-credit.txt` in the draft folder
   (direct API), `~/Documents/nanobanana_generated/` (optional MCP), and
-  `~/.claude/settings.json` (setup only).
+  the blog repo's `.mcp.json` or, with `--global`, `~/.claude.json` (setup only).
 - **Consent:** before the FIRST paid call or file write in a session, tell
   the user the model, size, image count, and estimated cost (count times price)
   and wait for an explicit yes. The yes covers only that count. Asking for a
@@ -327,14 +327,18 @@ image capability configuration, and it needs the user's explicit yes first.
    install implicitly during a run.
 
 **Optional MCP path (at your own risk):**
-1. Run `python3 "$BLOG_SKILLS_DIR/blog-image/scripts/setup_image_mcp.py"` (interactive)
+1. Run `python3 "$BLOG_SKILLS_DIR/blog-image/scripts/setup_image_mcp.py" --project-dir "<blog repo>"` (interactive),
+   passing the blog repo root (the user's project folder, not the plugin folder)
    - Prefer exporting `GOOGLE_AI_API_KEY` before invoking the setup script so a
      literal key does not enter shell history
-   - Or: `python3 "$BLOG_SKILLS_DIR/blog-image/scripts/setup_image_mcp.py" --key-file /path/to/key.txt`
+   - Or: `python3 "$BLOG_SKILLS_DIR/blog-image/scripts/setup_image_mcp.py" --project-dir "<blog repo>" --key-file /path/to/key.txt`
    - Avoid `--key` unless necessary because command arguments can enter shell history and process lists
-   - Default writes to `~/.claude/settings.json` (user-private, mode 0600)
-   - `--project` flag opts into project `.mcp.json` (env-expansion only,
+   - `--project-dir` writes that folder's `.mcp.json` (env-expansion only,
      refuses to write a literal key into a tracked file)
+   - `--global` instead writes the user-scope MCP servers in `~/.claude.json`
+     (mode 0600; other keys and servers kept). Use one of the two, never both
+   - Without either, an installed copy refuses and writes nothing
+   - `--check` and `--remove` take the same `--project-dir` or `--global`
 2. Verify: `python3 "$BLOG_SKILLS_DIR/blog-image/scripts/validate_image_setup.py"`
 3. Requires Node.js 18+ (npx).
 4. **Caveat:** the script pins `@ycse/nanobanana-mcp@1.1.1`. That npm

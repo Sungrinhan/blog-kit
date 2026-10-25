@@ -2,8 +2,20 @@
 """
 Setup script for nanobanana-mcp in claude-blog.
 
-Configures @ycse/nanobanana-mcp in Claude Code's global settings.json
-(default) or the project's .mcp.json (with --project flag).
+Configures @ycse/nanobanana-mcp for Claude Code. Fork (blog-kit): the target
+is one of two mutually exclusive choices, and setup, --check and --remove all
+use the same rule.
+
+- --project-dir <blog repo>: that folder's project .mcp.json (env-expansion
+  only, never a literal key).
+- --global: the user-scope MCP servers in ~/.claude.json, the file Claude Code
+  reads user-scope servers from. Other keys and servers in it are preserved.
+
+With neither, an installed copy (inside the Claude plugin cache) refuses and
+writes nothing. A development checkout may use its own checkout root
+(.claude-plugin/plugin.json named claude-blog); if that is not found, it
+refuses instead of falling back to the global file.
+The upstream --project flag means the same as giving no target.
 
 Note: the pinned package only calls the preview image models Google shut down
 on 2026-06-25 (https://ai.google.dev/gemini-api/docs/deprecations), so the MCP
@@ -15,11 +27,10 @@ more than one secret: the script writes only the one API key it finds, and
 refuses the file when it sees any other credential.
 
 Usage:
-    python3 setup_image_mcp.py                    # Interactive (writes global)
-    python3 setup_image_mcp.py --key-file key.txt # Non-interactive
-    python3 setup_image_mcp.py --check            # Verify existing setup
-    python3 setup_image_mcp.py --remove           # Remove MCP config
-    python3 setup_image_mcp.py --project          # Write to project .mcp.json (env-expansion only)
+    python3 setup_image_mcp.py --project-dir <blog repo>   # Interactive, project .mcp.json
+    python3 setup_image_mcp.py --global --key-file key.txt # Non-interactive, ~/.claude.json
+    python3 setup_image_mcp.py --project-dir <blog repo> --check   # Verify existing setup
+    python3 setup_image_mcp.py --project-dir <blog repo> --remove  # Remove MCP config
     python3 setup_image_mcp.py --json             # Output structured JSON
     python3 setup_image_mcp.py --help             # Show usage
 """
@@ -39,7 +50,7 @@ DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
 PINNED_PACKAGE = "@ycse/nanobanana-mcp@1.1.1"
 ENV_PLACEHOLDER = "${GOOGLE_AI_API_KEY}"
 PLUGIN_NAME = "claude-blog"
-GLOBAL_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+GLOBAL_MCP_PATH = Path.home() / ".claude.json"
 PLACEHOLDER_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 # Google API keys start with AIza and are 39 characters long.
 GOOGLE_KEY_RE = re.compile(r"AIza[0-9A-Za-z_\-]{35}")
@@ -83,17 +94,41 @@ def find_project_mcp_json() -> Path:
     return None
 
 
-def get_config_path(use_global: bool, quiet: bool = False) -> Path:
-    """Get the appropriate config file path."""
+def running_from_plugin_cache() -> bool:
+    """Return True when this script is an installed copy in the plugin cache."""
+    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    cache = (config_dir / "plugins").resolve()
+    return Path(__file__).resolve().is_relative_to(cache)
+
+
+def resolve_target(project_dir: str | None, use_global: bool) -> tuple[Path, bool]:
+    """Return (config path, is global) for the one target the flags select.
+
+    Raises ValueError, before anything is read or written, when both targets
+    are given, when an installed copy is given neither, or when a development
+    checkout cannot find its own root.
+    """
+    hint = "Pass --project-dir <blog repo> or --global. Nothing was written."
+    if project_dir and use_global:
+        raise ValueError(f"Use either --project-dir or --global, not both. {hint}")
     if use_global:
-        return GLOBAL_SETTINGS_PATH
+        return GLOBAL_MCP_PATH, True
+    if project_dir:
+        folder = Path(project_dir).expanduser().resolve()
+        if not folder.is_dir():
+            raise ValueError(f"--project-dir is not a folder: {folder}. Nothing was written.")
+        return folder / ".mcp.json", False
+    if running_from_plugin_cache():
+        raise ValueError(
+            "This is an installed plugin copy, so there is no project to find. " + hint
+        )
     project_path = find_project_mcp_json()
-    if project_path:
-        return project_path
-    if not quiet:
-        print("Warning: Could not find project root (.claude-plugin/plugin.json).")
-        print("Falling back to global settings.")
-    return GLOBAL_SETTINGS_PATH
+    if project_path is None:
+        raise ValueError(
+            "Could not find the checkout root (.claude-plugin/plugin.json named "
+            f"{PLUGIN_NAME}). " + hint
+        )
+    return project_path, False
 
 
 def load_config(path: Path) -> dict:
@@ -277,62 +312,52 @@ def _placeholder_env_var(value: str) -> str:
     return match.group(1) if match else ""
 
 
-def check_setup(use_global: bool, as_json: bool = False) -> bool:
-    """Check if MCP is already configured."""
-    # Check project-level first, then global
-    paths_to_check = []
-    if not use_global:
-        project_path = find_project_mcp_json()
-        if project_path:
-            paths_to_check.append(("Project .mcp.json", project_path))
-    paths_to_check.append(("Global settings.json", GLOBAL_SETTINGS_PATH))
-
-    for label, path in paths_to_check:
-        config = load_config(path)
-        servers = config.get("mcpServers", {})
-        if MCP_NAME in servers:
-            env = servers[MCP_NAME].get("env", {})
-            key = env.get("GOOGLE_AI_API_KEY", "")
-            placeholder_var = _placeholder_env_var(key)
-            key_ok = bool(key)
-            key_detail = f"<{len(key)} chars, set>" if key else "(not set)"
-            if placeholder_var:
-                key_ok = bool(os.environ.get(placeholder_var))
-                key_detail = (
-                    f"{key} resolves from environment"
-                    if key_ok
-                    else f"{key} is configured but {placeholder_var} is not exported"
-                )
-            result = {
-                "status": "success" if key_ok else "error",
-                "configured": True,
-                "path": str(path),
-                "scope": label,
-                "package": PINNED_PACKAGE,
-                "api_key_ok": key_ok,
-                "api_key": key_detail,
-                "model": env.get("NANOBANANA_MODEL", DEFAULT_MODEL),
-            }
-            if as_json:
-                print(json.dumps(result, indent=2))
-            else:
-                print(f"MCP server '{MCP_NAME}' found in {label}.")
-                print(f"  Path:    {path}")
-                print(f"  Package: {PINNED_PACKAGE}")
-                print(f"  API Key: {key_detail}")
-                print(f"  Model:   {result['model']}")
-            return key_ok
-
+def check_setup(path: Path, use_global: bool, as_json: bool = False) -> bool:
+    """Check if MCP is already configured in the selected target."""
+    label = "User-scope ~/.claude.json" if use_global else "Project .mcp.json"
+    config = load_config(path)
+    servers = config.get("mcpServers", {})
+    if MCP_NAME not in servers:
+        if as_json:
+            print(json.dumps({"status": "missing", "configured": False, "path": str(path)}, indent=2))
+        else:
+            print(f"MCP server '{MCP_NAME}' is NOT configured in {label} ({path}).")
+        return False
+    env = servers[MCP_NAME].get("env", {})
+    key = env.get("GOOGLE_AI_API_KEY", "")
+    placeholder_var = _placeholder_env_var(key)
+    key_ok = bool(key)
+    key_detail = f"<{len(key)} chars, set>" if key else "(not set)"
+    if placeholder_var:
+        key_ok = bool(os.environ.get(placeholder_var))
+        key_detail = (
+            f"{key} resolves from environment"
+            if key_ok
+            else f"{key} is configured but {placeholder_var} is not exported"
+        )
+    result = {
+        "status": "success" if key_ok else "error",
+        "configured": True,
+        "path": str(path),
+        "scope": label,
+        "package": PINNED_PACKAGE,
+        "api_key_ok": key_ok,
+        "api_key": key_detail,
+        "model": env.get("NANOBANANA_MODEL", DEFAULT_MODEL),
+    }
     if as_json:
-        print(json.dumps({"status": "missing", "configured": False}, indent=2))
+        print(json.dumps(result, indent=2))
     else:
-        print(f"MCP server '{MCP_NAME}' is NOT configured.")
-    return False
+        print(f"MCP server '{MCP_NAME}' found in {label}.")
+        print(f"  Path:    {path}")
+        print(f"  Package: {PINNED_PACKAGE}")
+        print(f"  API Key: {key_detail}")
+        print(f"  Model:   {result['model']}")
+    return key_ok
 
 
-def remove_mcp(use_global: bool, as_json: bool = False) -> None:
-    """Remove MCP configuration."""
-    path = get_config_path(use_global, quiet=as_json)
+def remove_mcp(path: Path, as_json: bool = False) -> None:
+    """Remove MCP configuration from the selected target."""
     config = load_config(path)
     servers = config.get("mcpServers", {})
     if MCP_NAME in servers:
@@ -350,7 +375,7 @@ def remove_mcp(use_global: bool, as_json: bool = False) -> None:
             print(f"'{MCP_NAME}' not found in {path}.")
 
 
-def setup_mcp(api_key: str, use_global: bool, as_json: bool = False) -> None:
+def setup_mcp(api_key: str, path: Path, use_global: bool, as_json: bool = False) -> None:
     """Configure MCP server. Project mode uses env-expansion only (never literal key)."""
     if not api_key or not api_key.strip():
         emit_error("API key cannot be empty.", as_json)
@@ -361,8 +386,6 @@ def setup_mcp(api_key: str, use_global: bool, as_json: bool = False) -> None:
             "digits, '-' and '_'). Nothing was written.",
             as_json,
         )
-    path = get_config_path(use_global, quiet=as_json)
-
     # Safety: project mode must never write a literal key into a tracked file.
     if not use_global and _is_git_tracked(path):
         gitignore = path.parent / ".gitignore"
@@ -371,14 +394,14 @@ def setup_mcp(api_key: str, use_global: bool, as_json: bool = False) -> None:
             message = (
                 f"{path} is tracked by git and .gitignore does not exclude .mcp.json. "
                 f"Add '.mcp.json' to {gitignore} and run: git rm --cached .mcp.json, "
-                "or use --global to write to ~/.claude/settings.json instead."
+                "or use --global to write to ~/.claude.json instead."
             )
             if as_json:
                 emit_error(message, as_json, exit_code=2)
             print(f"REFUSING: {path} is tracked by git and .gitignore does not exclude .mcp.json.")
             print("Either:")
             print(f"  1. Add '.mcp.json' to {gitignore} and run: git rm --cached .mcp.json")
-            print("  2. Use --global to write to ~/.claude/settings.json instead (recommended).")
+            print("  2. Use --global to write to ~/.claude.json instead.")
             sys.exit(2)
 
     config = load_config(path)
@@ -446,8 +469,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--key-file", help="Read API key from a local file")
     parser.add_argument("--check", action="store_true", help="Verify existing setup")
     parser.add_argument("--remove", action="store_true", help="Remove MCP configuration")
-    parser.add_argument("--project", action="store_true", help="Write project .mcp.json")
-    parser.add_argument("--global", dest="global_scope", action="store_true", help="Write global settings")
+    parser.add_argument("--project-dir", help="Blog repo folder whose .mcp.json is the target")
+    parser.add_argument(
+        "--project", action="store_true",
+        help="Upstream flag: the checkout's own .mcp.json, same as giving no target",
+    )
+    parser.add_argument(
+        "--global", dest="global_scope", action="store_true",
+        help="Target the user-scope MCP servers in ~/.claude.json",
+    )
     parser.add_argument("--json", action="store_true", help="Output structured JSON")
     return parser
 
@@ -455,20 +485,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    # Safer default: --global (writes user-private ~/.claude/settings.json).
-    # --project opts in to project-local config (with safety guards).
-    if args.project and args.global_scope:
-        emit_error("Use either --project or --global, not both", args.json, exit_code=2)
-    use_global = not args.project
+    # Fork: one explicit target, resolved before any key is read or file written.
+    try:
+        if args.project and (args.project_dir or args.global_scope):
+            raise ValueError(
+                "Use only one of --project, --project-dir or --global. Nothing was written."
+            )
+        path, use_global = resolve_target(args.project_dir, args.global_scope)
+    except ValueError as exc:
+        emit_error(str(exc), args.json, exit_code=2)
 
     try:
         if args.check:
-            ok = check_setup(use_global, args.json)
+            ok = check_setup(path, use_global, args.json)
             sys.exit(0 if ok else 1)
             return
 
         if args.remove:
-            remove_mcp(use_global, args.json)
+            remove_mcp(path, args.json)
             return
 
         api_key = None
@@ -498,7 +532,7 @@ def main() -> None:
             except (EOFError, KeyboardInterrupt):
                 emit_error("No input received. Provide --key-file or set GOOGLE_AI_API_KEY.", args.json)
 
-        setup_mcp(api_key, use_global, args.json)
+        setup_mcp(api_key, path, use_global, args.json)
     except (OSError, ValueError) as exc:
         if args.json:
             print(json.dumps({"status": "error", "error": str(exc)}, indent=2))

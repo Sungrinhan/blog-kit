@@ -37,12 +37,14 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `skills/blog-cluster/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
 - `skills/blog-flow/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
 - `skills/blog-google/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
-- `skills/blog-image/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
+- `skills/blog-image/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`. MCP 설정 도우미 호출 안내를 `--project-dir "<blog repo>"`로, 쓰는 위치 설명을 `.mcp.json`·`~/.claude.json`으로
 - `skills/blog-locale-audit/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
 - `skills/blog-localize/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
 - `skills/blog-multilingual/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
 - `skills/blog-notebooklm/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
 - `skills/blog-translate/SKILL.md`: 메타데이터 버전 `2.3.1-kit.1`
+- `skills/blog-image/scripts/setup_image_mcp.py`: 대상 선택을 `--project-dir <블로그 레포>`(그 폴더의 `.mcp.json`)와 `--global`(사용자 범위 MCP를 실제로 읽는 `~/.claude.json`, 다른 키·서버 보존) 둘 중 하나로. 설치본(플러그인 캐시 안)에서 둘 다 없으면 오류로 멈추고 아무것도 쓰지 않음, 개발 체크아웃은 자기 루트 자동 탐색만 허용하고 실패하면 전역으로 넘어가지 않음. 설정·확인·제거가 같은 규칙. 업스트림 `--project`는 대상 없음과 같은 뜻으로 유지
+- `tests/test_scripts_wave3_image.py`: 기존 전역 설정 테스트를 `~/.claude.json` 기대값과 새 함수 인자로. 임시 HOME·설치본 흉내로 대상 선택 사례(대상 없음·경로·전역·둘 다·자동 탐색 실패·성공, `--project`)를 설정·확인·제거에 대해 확인
 - `tests/test_release_safeguards.py`: 검사기 픽스처를 포크 값으로, 마켓 이름 단언을 `blog-kit`으로. 업스트림 보안 checkout 안내 필수 테스트를 포크 보안 URL·설치 스크립트 제외·author 유지 테스트로 교체
 - `tests/test_version_coherence.py`: 버전 표면 비교를 대응 규칙으로(`2.3.1-kit.N` ↔ `2.3.1+kit.N`, 접미사 없는 형식도 수용), 기준 버전을 plugin.json으로, 임시 폴더 픽스처로 일치·불일치 확인
 - `uv.lock`: 패키지 버전 변경에 따른 재생성(`claude-blog` `2.3.1+kit.1`)

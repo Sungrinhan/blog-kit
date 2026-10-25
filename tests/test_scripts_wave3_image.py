@@ -154,13 +154,15 @@ def test_multi_secret_key_file_never_reaches_settings(tmp_path):
     assert result.returncode == 1
     assert "more than one secret" in result.stdout
     assert OTHER_KEY not in result.stdout + result.stderr
+    assert not (tmp_path / ".claude.json").exists()
     assert not (tmp_path / ".claude" / "settings.json").exists()
 
 
 def test_single_key_file_writes_only_the_key_with_mode_600(tmp_path):
     result = _run_setup(tmp_path, f"# comment\nGOOGLE_AI_API_KEY={GOOGLE_KEY}\n")
     assert result.returncode == 0, result.stdout
-    settings = tmp_path / ".claude" / "settings.json"
+    # Fork: --global targets the user-scope servers in ~/.claude.json.
+    settings = tmp_path / ".claude.json"
     config = json.loads(settings.read_text())
     assert config["mcpServers"]["nanobanana-mcp"]["env"]["GOOGLE_AI_API_KEY"] == GOOGLE_KEY
     assert "comment" not in settings.read_text()
@@ -169,7 +171,168 @@ def test_single_key_file_writes_only_the_key_with_mode_600(tmp_path):
 
 
 def test_setup_rejects_a_multiline_key_passed_directly(setup, tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(setup, "GLOBAL_SETTINGS_PATH", tmp_path / "settings.json")
+    target = tmp_path / ".claude.json"
     with pytest.raises(SystemExit):
-        setup.setup_mcp(f"{GOOGLE_KEY}\nOPENAI_API_KEY={OTHER_KEY}", True, True)
-    assert not (tmp_path / "settings.json").exists()
+        setup.setup_mcp(f"{GOOGLE_KEY}\nOPENAI_API_KEY={OTHER_KEY}", target, True, True)
+    assert not target.exists()
+
+
+# ---- setup_image_mcp target selection (fork, spec S3) -----------------------
+# Two mutually exclusive targets: --project-dir <blog repo> writes that
+# folder's .mcp.json, --global writes the user-scope servers in ~/.claude.json.
+# An installed copy (inside the plugin cache) with neither refuses to write.
+
+OPS = {
+    "setup": ["--key-file", "KEYFILE"],
+    "check": ["--check"],
+    "remove": ["--remove"],
+}
+
+
+def _plugin_root(root: Path) -> Path:
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "claude-blog"}))
+    scripts = root / "skills" / "blog-image" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / SETUP.name).write_bytes(SETUP.read_bytes())
+    return scripts / SETUP.name
+
+
+@pytest.fixture
+def world(tmp_path):
+    """A temp HOME with an installed plugin copy, user settings, and a blog repo."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({"theme": "dark"}))
+    (home / ".claude.json").write_text(json.dumps({
+        "numStartups": 3,
+        "projects": {"/x": {"allowedTools": []}},
+        "mcpServers": {"other-server": {"command": "other"}},
+    }))
+    installed = _plugin_root(home / ".claude" / "plugins" / "cache" / "blog-kit" / "claude-blog" / "2.3.1-kit.1")
+    blog = tmp_path / "blog"
+    blog.mkdir()
+    key_file = tmp_path / "key.txt"
+    key_file.write_text(GOOGLE_KEY + "\n")
+    return {"tmp": tmp_path, "home": home, "installed": installed, "blog": blog, "key": key_file}
+
+
+def _snapshot(*roots: Path) -> dict[str, bytes]:
+    return {
+        str(p): p.read_bytes()
+        for root in roots for p in sorted(root.rglob("*"))
+        if p.is_file() and p.suffix != ".py"
+    }
+
+
+def _run_target(world, script: Path, op: str, *target: str, cwd: Path | None = None):
+    args = [a.replace("KEYFILE", str(world["key"])) for a in OPS[op]]
+    env = dict(os.environ, HOME=str(world["home"]))
+    for name in ("GOOGLE_AI_API_KEY", "CLAUDE_CONFIG_DIR"):
+        env.pop(name, None)
+    result = subprocess.run(
+        [sys.executable, str(script), *args, *target, "--json"],
+        capture_output=True, text=True, env=env, cwd=cwd or world["blog"],
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        payload = {}
+    return result, payload
+
+
+@pytest.mark.parametrize("op", sorted(OPS))
+def test_installed_copy_without_a_target_refuses_and_writes_nothing(world, op):
+    before = _snapshot(world["tmp"])
+    result, payload = _run_target(world, world["installed"], op)
+    assert result.returncode != 0
+    assert payload.get("status") == "error"
+    assert "--project-dir" in payload["error"] and "--global" in payload["error"]
+    assert _snapshot(world["tmp"]) == before
+
+
+def _changed(before: dict[str, bytes], after: dict[str, bytes]) -> set[str]:
+    return {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
+
+
+def _lifecycle(world, script: Path, target_args: tuple[str, ...], target: Path, cwd=None):
+    """Run setup, check and remove against one target; only it may change."""
+    before = _snapshot(world["tmp"])
+    result, payload = _run_target(world, script, "setup", *target_args, cwd=cwd)
+    assert result.returncode == 0, result.stdout
+    assert payload["config"] == str(target)
+    assert _changed(before, _snapshot(world["tmp"])) == {str(target)}
+    assert "nanobanana-mcp" in json.loads(target.read_text())["mcpServers"]
+
+    _, payload = _run_target(world, script, "check", *target_args, cwd=cwd)
+    assert payload["configured"] is True and payload["path"] == str(target)
+
+    result, payload = _run_target(world, script, "remove", *target_args, cwd=cwd)
+    assert result.returncode == 0 and payload["removed"] is True
+    assert payload["path"] == str(target)
+    assert "nanobanana-mcp" not in json.loads(target.read_text())["mcpServers"]
+    changed = _changed(before, _snapshot(world["tmp"]))
+    assert changed <= {str(target)}
+
+
+def test_project_dir_targets_only_that_folders_mcp_json(world):
+    target = world["blog"] / ".mcp.json"
+    _lifecycle(world, world["installed"], ("--project-dir", str(world["blog"])), target)
+
+
+def test_project_dir_never_writes_a_literal_key(world):
+    _run_target(world, world["installed"], "setup", "--project-dir", str(world["blog"]))
+    text = (world["blog"] / ".mcp.json").read_text()
+    assert GOOGLE_KEY not in text and "${GOOGLE_AI_API_KEY}" in text
+
+
+def test_global_targets_user_scope_servers_and_preserves_the_rest(world):
+    target = world["home"] / ".claude.json"
+    settings_before = (world["home"] / ".claude" / "settings.json").read_bytes()
+    _lifecycle(world, world["installed"], ("--global",), target)
+    config = json.loads(target.read_text())
+    assert config["numStartups"] == 3
+    assert config["projects"] == {"/x": {"allowedTools": []}}
+    assert config["mcpServers"] == {"other-server": {"command": "other"}}
+    assert (world["home"] / ".claude" / "settings.json").read_bytes() == settings_before
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("op", sorted(OPS))
+def test_both_targets_is_an_error_and_writes_nothing(world, op):
+    before = _snapshot(world["tmp"])
+    result, payload = _run_target(
+        world, world["installed"], op, "--project-dir", str(world["blog"]), "--global"
+    )
+    assert result.returncode != 0 and payload["status"] == "error"
+    assert _snapshot(world["tmp"]) == before
+
+
+@pytest.mark.parametrize("op", sorted(OPS))
+def test_checkout_without_a_findable_root_refuses_instead_of_going_global(world, op):
+    loose = world["tmp"] / "loose"
+    loose.mkdir()
+    script = loose / SETUP.name
+    script.write_bytes(SETUP.read_bytes())
+    before = _snapshot(world["tmp"])
+    result, payload = _run_target(world, script, op, cwd=loose)
+    assert result.returncode != 0 and payload["status"] == "error"
+    assert "--project-dir" in payload["error"]
+    assert _snapshot(world["tmp"]) == before
+
+
+def test_checkout_without_a_target_uses_its_own_root(world):
+    checkout = world["tmp"] / "checkout"
+    script = _plugin_root(checkout)
+    _lifecycle(world, script, (), checkout / ".mcp.json", cwd=checkout)
+
+
+@pytest.mark.parametrize("op", sorted(OPS))
+def test_upstream_project_flag_follows_the_no_target_rule(world, op):
+    """--project (upstream docs) means "this checkout's own .mcp.json"."""
+    before = _snapshot(world["tmp"])
+    result, payload = _run_target(world, world["installed"], op, "--project")
+    assert result.returncode != 0 and payload["status"] == "error"
+    assert _snapshot(world["tmp"]) == before
+    result, payload = _run_target(world, world["installed"], op, "--project", "--global")
+    assert result.returncode != 0 and payload["status"] == "error"
