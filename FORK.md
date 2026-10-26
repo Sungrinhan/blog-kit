@@ -15,7 +15,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `FORK.md`: 이 문서. 업스트림 기준 커밋과 포크 변경 목록
 - `tests/test_fork_manifest.py`: 이 문서의 목록과 실제 변경(기준 대비 index와 작업 트리 각각)의 일치 검사. 얕은 clone에서만 skip, 기준 커밋이 없는 일반 clone은 실패
 - `tests/test_fork_identity.py`: 플러그인 이름·업스트림 author 유지, 포크 마켓 이름·owner와 기존 항목 유지, LICENSE 업스트림 저작권 줄 유지, 포크가 고친 설명의 스킬 폴더 수 검사
-- `scripts/doctor.py`: 설치 점검. 블로그 레포가 고정한 버전과 실제 실행된 엔진(공유 설정, `claude plugin list --json`, 설치 레지스트리, 태그 커밋), 실행 경로, Python 버전, 런타임 경로를 검사해 JSON으로 출력. 확인할 수 없으면 실패. 이 블로그 레포의 설치는 레지스트리 `projectPath`로 먼저 골라 다른 레포의 project 설치와 구분하고, 런타임 경로는 기본·활성 Claude 플러그인 폴더 밖이고 폴더(또는 아직 없음)여야 함. 다른 마켓의 같은 이름 플러그인은 user 범위이거나, 레지스트리가 이 블로그 레포에 둔 project·local 설치일 때만 활성으로 봄(어느 레포 것인지 모르면 확인 불가). 설정·레지스트리 파일은 symlink를 따르지 않고 4MB까지만 읽으며, symlink인 `--blog-repo`는 거부
+- `scripts/doctor.py`: 설치 점검. 블로그 레포가 고정한 버전과 실제 실행된 엔진(공유 설정, `claude plugin list --json`, 설치 레지스트리, 태그 커밋), 실행 경로, Python 버전, 런타임 경로를 검사해 JSON으로 출력. 확인할 수 없으면 실패. 이 블로그 레포의 설치는 레지스트리 `projectPath`로 먼저 골라 다른 레포의 project 설치와 구분하고, 런타임 경로는 기본·활성 Claude 플러그인 폴더 밖이고 폴더(또는 아직 없음)여야 함. 다른 마켓의 같은 이름 플러그인은 user 범위이거나, 레지스트리가 이 블로그 레포에 둔 project·local 설치일 때만 활성으로 봄(어느 레포 것인지 모르면 확인 불가). 설정·레지스트리 파일은 symlink를 따르지 않고 4MB까지만 읽으며, symlink인 `--blog-repo`는 거부. 설치 신원 검사(a~f)는 `identity_checks()`로 다른 설치 스크립트(엔진 CLI)가 불러 쓸 수 있고, 이때 실행 경로 검사는 부른 스크립트의 경로로 판정
 - `skills/blog-doctor/SKILL.md`: 설치된 설치 점검 스크립트를 실행하고 결과를 보여 주는 스킬(`/blog-doctor`). 라우터 명령 표에는 넣지 않음. 다른 스킬과 달리 `CLAUDE_BLOG_SCRIPTS_DIR` override를 따르지 않고 설치본의 스크립트만 실행한다(점검 (f)가 실행 위치를 확인하므로, override로 다른 사본을 돌리면 점검이 뜻을 잃는다)
 - `tests/test_doctor.py`: 스텁 `claude`·`git`과 임시 블로그 레포·레지스트리로 설치 점검의 통과·실패 사례와 비밀 비노출 확인
 - `docs/BLOG-KIT-UPGRADE.md`: 블로그 레포 설정 예시와 설치·업그레이드·다운그레이드 순서, uninstall 금지, 런타임 경로 첫 전환, 보존 확인

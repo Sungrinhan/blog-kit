@@ -373,3 +373,44 @@ def test_blog_repo_argument_that_is_a_symlink_is_refused(world: World) -> None:
     assert rc == 2
     assert payload["status"] == "error" and "symlink" in payload["error"]
     assert world.calls("claude") == []
+
+
+IDENTITY_IDS = CHECK_IDS[:6]
+# Another installed script (like the engine CLI) loads the doctor from its
+# install root and asks for the install identity checks only, naming itself as
+# the script whose path must sit inside the install path.
+IDENTITY_CALLER = """\
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("doctor", Path(DOCTOR_PATH))
+doctor = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(doctor)
+args = doctor.build_parser().parse_args(sys.argv[1:])
+checks = doctor.identity_checks(
+    blog=Path(args.blog_repo), claude=args.claude, git=args.git,
+    registry=doctor.default_registry(), timeout=args.timeout, script=Path(__file__),
+)
+print(json.dumps({"checks": checks}))
+"""
+
+
+def _identity_caller(w: World, folder: Path) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    caller = folder / "caller.py"
+    caller.write_text(IDENTITY_CALLER.replace("DOCTOR_PATH", repr(str(w.script))))
+    return caller
+
+
+def test_another_installed_script_can_run_the_identity_checks(world: World) -> None:
+    rc, payload, output = world.run(script=_identity_caller(world, world.install / "adapters" / "astro"))
+    assert rc == 0, output
+    assert _statuses(payload) == {check: "ok" for check in IDENTITY_IDS}
+    assert PLANTED_VALUE not in output
+
+
+def test_identity_checks_judge_the_calling_script_path(world: World) -> None:
+    rc, payload, output = world.run(script=_identity_caller(world, world.tmp / "dev-checkout"))
+    assert rc == 0, output
+    statuses = _statuses(payload)
+    assert statuses["f_exec_path"] == "fail"
+    assert all(statuses[c] == "ok" for c in IDENTITY_IDS[:5])

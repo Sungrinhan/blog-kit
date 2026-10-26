@@ -18,7 +18,9 @@ d  the installed version equals the pinned tag without its leading v
 e  the registry commit SHA equals the commit the tag points to on the fork
    (`git ls-remote` of the exact tag ref and its peeled ref)
 f  this script runs from inside the install path (so a development checkout
-   fails this check on purpose)
+   fails this check on purpose). Checks a to f are the install identity;
+   another installed script (the engine CLI) runs them through
+   identity_checks(), which judges the calling script's path instead
 g  Python is 3.11 or newer
 h  CLAUDE_BLOG_RUNTIME_DIR is set in .claude/settings.local.json and in this
    process environment, the two agree, the value passes the runtime path rules
@@ -130,9 +132,23 @@ def _run(command: list[str], cwd: Path, timeout: float, label: str) -> str:
     return result.stdout
 
 
+IDENTITY_CHECKS = (
+    "a_shared_settings", "b_cli_install", "c_registry", "d_version", "e_commit", "f_exec_path",
+)
+ALL_CHECKS = IDENTITY_CHECKS + ("g_python", "h_runtime_dir")
+
+
+def default_registry() -> Path:
+    return claude_config_dir() / "plugins" / "installed_plugins.json"
+
+
 class Doctor:
-    def __init__(self, blog: Path, claude: str, git: str, registry: Path, timeout: float) -> None:
+    def __init__(
+        self, blog: Path, claude: str, git: str, registry: Path, timeout: float,
+        script: Path | None = None,
+    ) -> None:
         self.blog = blog
+        self.script = (script or Path(__file__)).resolve()
         self.claude = claude
         self.git = git
         self.registry = registry
@@ -344,7 +360,7 @@ class Doctor:
         if self.cli is None:
             raise Unknown("depends on b_cli_install")
         install = Path(self.cli["installPath"]).resolve()
-        if not Path(__file__).resolve().is_relative_to(install):
+        if not self.script.is_relative_to(install):
             raise Fail("doctor is not running from the install path")
         return {"install_path": str(install)}
 
@@ -388,12 +404,9 @@ class Doctor:
                 raise Fail(f"{RUNTIME_VAR} resolves inside the Claude plugin folder")
         return {"runtime_dir": str(resolved)}
 
-    def run(self) -> list[dict]:
+    def run(self, check_ids: tuple[str, ...] = ALL_CHECKS) -> list[dict]:
         results = []
-        for check_id in (
-            "a_shared_settings", "b_cli_install", "c_registry", "d_version",
-            "e_commit", "f_exec_path", "g_python", "h_runtime_dir",
-        ):
+        for check_id in check_ids:
             check = getattr(self, f"check_{check_id}")
             try:
                 fields, status, reason = check(), "ok", "ok"
@@ -405,6 +418,21 @@ class Doctor:
                 fields, status, reason = {}, "unknown", f"unexpected {type(exc).__name__}"
             results.append({"id": check_id, "status": status, "reason": reason, **fields})
         return results
+
+
+def identity_checks(
+    blog: Path, claude: str | None, git: str | None, registry: Path, timeout: float, script: Path,
+) -> list[dict]:
+    """Run checks a to f for another installed script, judging that script's own path."""
+    doctor = Doctor(
+        blog=blog.resolve(),
+        claude=claude or shutil.which("claude") or "claude",
+        git=git or shutil.which("git") or "git",
+        registry=registry,
+        timeout=timeout,
+        script=script,
+    )
+    return doctor.run(IDENTITY_CHECKS)
 
 
 def _with(exc: Exception, fields: dict) -> Exception:
@@ -433,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "error", "error": "--blog-repo is a symlink; pass the real folder"}, indent=2))
         return 2
     blog = Path(args.blog_repo or Path.cwd()).resolve()
-    registry = Path(args.registry) if args.registry else claude_config_dir() / "plugins" / "installed_plugins.json"
+    registry = Path(args.registry) if args.registry else default_registry()
     doctor = Doctor(
         blog=blog,
         claude=args.claude or shutil.which("claude") or "claude",
