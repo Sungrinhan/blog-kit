@@ -53,13 +53,20 @@ blog-kit(포크)이 지원하는 설치는 하나다: 블로그 레포의 공유
 2. **마켓 갱신**: 블로그 레포에서 `claude plugin marketplace update blog-kit`.
 3. **재설치**: 처음이면 `claude plugin install claude-blog@blog-kit --scope project`, 이미 설치되어 있으면 `claude plugin update claude-blog@blog-kit --scope project`. 설치 점검의 `d_version`이 목표 버전이 아니면 `claude plugin install claude-blog@blog-kit --scope project`를 다시 실행한다.
 4. **세션 재시작**: 블로그 레포에서 Claude Code를 완전히 끄고 다시 연다.
-5. **설치 점검**: `/blog-doctor`를 실행하거나, 설치본의 스크립트를 직접 실행한다.
+5. **검증기 사본 동기화**: 설치본의 엔진 CLI로 블로그 레포의 검증기 사본(`<blog repo>/scripts/blogkit_verify.py`)을 새 버전의 정본으로 바꾼다. 설치 신원(a~f)이 모두 맞아야 실행되고, 사본이 어긋난 상태에서도 실행된다.
+
+   ```bash
+   python3 "<installPath>/adapters/astro/blogkit.py" sync-verifier --blog-repo "<blog repo>"
+   ```
+
+6. **사본 커밋**: 바뀐 `<blog repo>/scripts/blogkit_verify.py`를 블로그 레포에 커밋한다. 엔진은 커밋하지 않는다. 엔진 CLI가 없는 버전(`2.3.1-kit.2` 이하)으로 바꿀 때는 5·6번이 없다.
+7. **설치 점검**: `/blog-doctor`를 실행하거나, 설치본의 스크립트를 직접 실행한다.
 
    ```bash
    python3 "<installPath>/scripts/doctor.py" --blog-repo "<blog repo>"
    ```
 
-   전부 `ok`이고 종료 코드 0이어야 한다. `d_version`은 목표 버전, `e_commit`의 `commit`과 `tag_commit`은 목표 태그의 커밋이다. 하나라도 `fail` 또는 `unknown`이면 그 이유를 고친 뒤 3번부터 다시 한다.
+   전부 `ok`이고 종료 코드 0이어야 한다. `d_version`은 목표 버전, `e_commit`의 `commit`과 `tag_commit`은 목표 태그의 커밋이다. `i_verifier_copy`만 `fail`이면 5번부터 다시 한다. 그 밖의 검사가 `fail` 또는 `unknown`이면 그 이유를 고친 뒤 3번부터 다시 한다.
 
 되돌리기(다운그레이드)도 위 순서 그대로, 1번에서 이전 태그로 바꾼다.
 

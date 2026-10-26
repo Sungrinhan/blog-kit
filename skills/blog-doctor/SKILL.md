@@ -50,6 +50,7 @@ each check that is not `ok`, say what the reason points at:
 | `f_exec_path` | the doctor did not run from the installed plugin |
 | `g_python` | Python is older than 3.11 |
 | `h_runtime_dir` | `CLAUDE_BLOG_RUNTIME_DIR` is missing from `.claude/settings.local.json` or this session, the two differ, it is not an absolute resolved path, or it points inside the Claude plugin folder; restart Claude Code after editing settings |
+| `i_verifier_copy` | `<blog repo>/scripts/blogkit_verify.py` is missing, a symlink, or not byte-identical to the installed verifier, or names another version; run `python3 "<installPath>/adapters/astro/blogkit.py" sync-verifier --blog-repo "<blog repo>"` and commit the copy |
 
 ## Boundaries
 
