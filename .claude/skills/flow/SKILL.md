@@ -27,7 +27,7 @@ allowed-tools: [Skill, Read, Grep, Glob, Bash, Edit, Write, Agent]
 | 트래커 | GitHub Issues (`Sungrinhan/blog-kit`, `gh` CLI). 규칙은 `docs/agents/issue-tracker.md`, 라벨은 `docs/agents/triage-labels.md`. 상태 파일·스펙 초안·승인 대기 파일은 `.scratch/<slug>/`에 로컬로 둔다(커밋 안 함) |
 | 테스트 환경 | `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'` (없으면 이것이 첫 티켓) |
 | 테스트 | `.venv/bin/python -m pytest tests/` |
-| 검증 | `.venv/bin/python scripts/validate_skills.py --root .`, `python3 scripts/lint_prose.py`, `claude plugin validate .` (이름 변경 전에는 "claude-blog is reserved" 1건이 알려진 정상) |
+| 검증 | `.venv/bin/python scripts/validate_skills.py --root .`, `python3 scripts/lint_prose.py`, `claude plugin validate .` (플러그인 이름 `claude-blog`을 유지하므로 매니페스트마다 "is reserved" 오류 1건, 마켓·플러그인 합쳐 2건이 알려진 정상) |
 | 연결 레포 | 블로그 사이트 `~/Documents/devlog` (Sungrinhan/devlog). 엔진 설치 설정·발행 검증 같은 사이트 쪽 작업이 있다 |
 
 ## 두 레포에 걸친 티켓
@@ -44,7 +44,7 @@ allowed-tools: [Skill, Read, Grep, Glob, Bash, Edit, Write, Agent]
 | 1 grill-with-docs | `$M/skills/engineering/grill-with-docs/SKILL.md` (그 지시대로 Skill `mattpocock-skills:grilling`, `mattpocock-skills:domain-modeling` 호출) | 계획 아티팩트의 해당 마일스톤을 먼저 읽음 | frontier가 비고 사용자가 공유된 이해를 확인함. 일찍 끝내면 "미해결 결정 있음"과 목록을 상태 파일에 |
 | 2 to-spec | `$M/skills/engineering/to-spec/SKILL.md` | 초안을 `.scratch/<slug>/spec-draft.md`에 쓰고 Skill `codex`로 검증 → 반영 | 시험 이음새(seam) 확인 → 본문 승인 → 다음 턴에 GitHub 이슈로 발행 |
 | 3 to-tickets | `$M/skills/engineering/to-tickets/SKILL.md` | 두 레포 티켓 표시 | 분할 승인 → 다음 턴에 발행 |
-| 4 implement | `$M/skills/engineering/implement/SKILL.md` (TDD는 Skill `mattpocock-skills:tdd`, 막히면 `mattpocock-skills:diagnosing-bugs`) | 모든 티켓 커밋 뒤 Skill `codex`에 레포별 diff | 티켓마다 커밋 승인, Codex 반영분 커밋 승인 |
+| 4 implement | `$M/skills/engineering/implement/SKILL.md` (TDD는 Skill `mattpocock-skills:tdd`, 막히면 `mattpocock-skills:diagnosing-bugs`) | 버전 전용 릴리스 티켓은 보류. 나머지 티켓 커밋 뒤 Skill `codex`에 레포별 diff | 티켓마다 커밋 승인, Codex 반영분 커밋 승인 |
 | 5 code-review | Skill `mattpocock-skills:code-review` (내장 `code-review`가 아님) | 고정점 = 상태 파일 `BASE`, 스펙 출처 = 상태 파일 `spec` | 고칠 항목 선택 → 고친 뒤 커밋 승인 |
 | 6 retro | `$M/skills/engineering/retro/SKILL.md` | 계획 아티팩트에 반영할 변경을 후보로 | 적용할 후보 선택 → 파일 수정은 승인 다음 턴 |
 
@@ -99,6 +99,7 @@ codex: 2단계 승인(N회) | 미해결 <요약>; 4단계 …
 ### 단계마다 공통
 - 시작할 때 원본 SKILL.md를 읽는다(규칙 9).
 - 끝나면 상태 파일을 갱신하고, 요약과 다음 단계 질문을 보여 준 뒤 **턴을 끝낸다**(규칙 1).
+- 임시 worktree·clone은 scratchpad의 새 경로로 만들고, 그 안에서도 되돌리기·삭제 명령(`git reset --hard`, `rm -rf`) 대신 새 경로를 하나 더 만든다. 만든 임시 경로는 상태 파일에 적어 마무리에서 보고하고, 정리는 승인 뒤 `git worktree remove`로 한다. 정리 명령이 훅에 보류되면 다시 시도하지 않고 멈춰 보고한다.
 
 ### 단계별 추가 지시 (원본과 다르게 하는 것만)
 - **1단계**: 계획 아티팩트를 읽고 해당 마일스톤의 내용·완료 기준·관련 결정을 grill의 출발점으로 쓴다. 계획의 결정(K·G)은 다시 묻지 않는다.
@@ -106,12 +107,15 @@ codex: 2단계 승인(N회) | 미해결 <요약>; 4단계 …
 - **3단계**: 분할 승인과 발행 승인은 서로 다른 턴이다. devlog 변경이 있는 티켓은 표시한다.
 - **4단계**:
   - 티켓을 시작하기 전에 스펙의 Testing Decisions(승인된 seam)를 확인한다. 없거나 모호하면 테스트를 쓰기 전에 묻는다.
+  - 티켓을 시작할 때 `CLAUDE.md`의 Development Rules와 `.github/CONTRIBUTING.md`의 스크립트·보안 규칙을 읽는다. 새 입력 경로(파일·폴더 인자, 읽는 설정 파일)에는 크기 제한과 symlink 거부를 두고 행동 테스트로 확인한다.
+  - 구현 중 발견한 범위 밖 문제는 스펙 문장·표준 근거와 대조한다. 스펙이 요구하면 그 티켓에서 구현하고, 아니면 상태 파일의 `이월:` 목록에 적어 마무리에서 보고한다.
+  - 버전만 올리는 릴리스 티켓(다운그레이드 확인용 B 등)은 보류한다. 4단계 Codex와 5단계 선택 수정이 모두 커밋된 뒤 A 확정·전체 검증 → B 커밋·전체 검증 → 최종 A/B SHA를 상태 파일에 적는다. B에는 버전 표면과 CHANGELOG 한 줄만 넣는다.
   - 원본 끝의 "code-review를 불러 리뷰하라"와 "현재 브랜치에 커밋하라"는 따르지 않는다.
   - 티켓 하나마다 `실패하는 테스트 → 통과(테스트 명령) → /commit 계획 제시 → 승인 → 커밋`. 커밋되면 `tickets`를 갱신한다.
   - frontier(다음 티켓)는 상태 파일의 `tickets`가 기준이다. 티켓 이슈의 상태(닫기·댓글)는 바꾸지 않고, 마무리에서 한꺼번에 제안한다.
-  - 모든 티켓이 커밋되면 레포별 비밀 검사 → Skill `codex`에 blog-kit `diff BASE..HEAD`(devlog 변경이 있으면 devlog `diff DEVLOG_BASE..HEAD`도 따로). 회차마다 지적 보고 → 사용자가 고른 것만 실패하는 테스트 → 고침 → 통과 → 재검토.
+  - 모든 티켓이 커밋되면 레포별 비밀 검사 → Skill `codex`에 blog-kit `diff BASE..HEAD`(devlog 변경이 있으면 devlog `diff DEVLOG_BASE..HEAD`도 따로). 프롬프트에 표준 출처(`CLAUDE.md` Development Rules, `.github/CONTRIBUTING.md`)와 `FORK.md`의 승인된 예외를 넘겨 적용 여부도 보게 한다. 회차마다 지적 보고 → 사용자가 고른 것만 실패하는 테스트 → 고침 → 통과 → 재검토.
   - 루프가 끝나면 반영분을 `/commit` 승인 절차로 커밋한다.
-- **5단계**: 리뷰 호출에 고정점(`BASE`)과 스펙 출처(`spec`)를 함께 넘긴다. 호출 전에 비밀 검사(`BASE...HEAD`).
+- **5단계**: 리뷰 호출에 고정점(`BASE`)과 스펙 출처(`spec`)를 함께 넘긴다. 호출 전에 비밀 검사(`BASE...HEAD`). 선택 수정 커밋이 끝나면(고칠 항목이 없어도) 보류한 버전 전용 티켓을 4단계 규칙대로 커밋한다.
 - **6단계**: 후보 제시까지만. 계획 아티팩트 갱신이 필요하면 후보로 낸다. 고른 후보의 수정은 변경 내용을 보여 준 다음 턴에 한다.
 
 ### 마무리
