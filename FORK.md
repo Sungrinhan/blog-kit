@@ -61,6 +61,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 엔진 기능이 아니라 이 포크를 개발하는 데 쓰는 파일.
 
 - `.claude/skills/flow/SKILL.md`: 마일스톤 작업 흐름 스킬(`/flow`)
+- `docs/adr/0001-publish-evidence-by-content-hash.md`: 발행 조건을 내용 해시에 묶인 발행 증거로 판정한다는 결정 기록(M2b)
 - `docs/agents/domain.md`: 에이전트용 도메인 문서 규칙
 - `docs/agents/issue-tracker.md`: 에이전트용 이슈 트래커 규칙
 - `docs/agents/triage-labels.md`: 에이전트용 triage 라벨 규칙
