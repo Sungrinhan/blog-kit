@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 DOCTOR = ROOT / "scripts" / "doctor.py"
 RUNTIME_PATHS = ROOT / "skills" / "blog-google" / "scripts" / "runtime_paths.py"
+VERIFIER = ROOT / "adapters" / "astro" / "blogkit_verify.py"
 
 PLUGIN_ID = "claude-blog@blog-kit"
 VERSION = "2.3.1-kit.1"
@@ -33,8 +35,14 @@ TAG_OBJECT = "a" * 40
 PLANTED_VALUE = "sk-" + "Z" * 30
 CHECK_IDS = [
     "a_shared_settings", "b_cli_install", "c_registry", "d_version",
-    "e_commit", "f_exec_path", "g_python", "h_runtime_dir",
+    "e_commit", "f_exec_path", "g_python", "h_runtime_dir", "i_verifier_copy",
 ]
+
+
+def verifier_bytes(version: str) -> bytes:
+    """The canonical verifier with its header naming another engine version."""
+    return re.sub(rb'^VERIFIER_VERSION = "[^"]*"$', f'VERIFIER_VERSION = "{version}"'.encode(),
+                  VERIFIER.read_bytes(), count=1, flags=re.MULTILINE)
 
 
 class World:
@@ -53,6 +61,12 @@ class World:
         runtime_copy = self.install / "skills" / "blog-google" / "scripts" / "runtime_paths.py"
         runtime_copy.parent.mkdir(parents=True)
         runtime_copy.write_bytes(RUNTIME_PATHS.read_bytes())
+        self.canonical = self.install / "adapters" / "astro" / "blogkit_verify.py"
+        self.canonical.parent.mkdir(parents=True)
+        self.canonical.write_bytes(verifier_bytes(VERSION))
+        self.copy = self.blog / "scripts" / "blogkit_verify.py"
+        self.copy.parent.mkdir()
+        self.copy.write_bytes(verifier_bytes(VERSION))
         self.registry = self.home / ".claude" / "plugins" / "installed_plugins.json"
 
         self.shared = {
@@ -234,6 +248,18 @@ def _upstream_project(w: World, project: Path | None) -> None:
         }]
 
 
+def _copy_symlink(w: World) -> None:
+    real = w.tmp / "verifier-real.py"
+    real.write_bytes(w.copy.read_bytes())
+    w.copy.unlink()
+    w.copy.symlink_to(real)
+
+
+def _copy_and_canonical_name_another_version(w: World) -> None:
+    w.canonical.write_bytes(verifier_bytes("2.3.1-kit.2"))
+    w.copy.write_bytes(verifier_bytes("2.3.1-kit.2"))
+
+
 PASSING = {
     "upstream plugin installed at project scope only in another repo": lambda w: _upstream_project(
         w, w.tmp / "other-repo"),
@@ -316,6 +342,15 @@ FAILING = {
         lambda w: _set_runtime(w, str(w.cache / "data")), "h_runtime_dir", "fail"),
     "runtime dir reaches the cache through a symlink": (_symlink_into_cache, "h_runtime_dir", "fail"),
     "runtime dir is an existing regular file": (_runtime_is_a_file, "h_runtime_dir", "fail"),
+    "verifier copy missing": (lambda w: w.copy.unlink(), "i_verifier_copy", "fail"),
+    "verifier copy differs from the installed canonical": (
+        lambda w: w.copy.write_bytes(w.copy.read_bytes() + b"# edited\n"), "i_verifier_copy", "fail"),
+    "verifier copy header names another version": (
+        _copy_and_canonical_name_another_version, "i_verifier_copy", "fail"),
+    "verifier copy is a symlink": (_copy_symlink, "i_verifier_copy", "fail"),
+    "verifier copy is a folder": (
+        lambda w: (w.copy.unlink(), w.copy.mkdir()), "i_verifier_copy", "fail"),
+    "installed canonical verifier missing": (lambda w: w.canonical.unlink(), "i_verifier_copy", "unknown"),
 }
 
 

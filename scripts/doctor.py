@@ -26,6 +26,11 @@ h  CLAUDE_BLOG_RUNTIME_DIR is set in .claude/settings.local.json and in this
    process environment, the two agree, the value passes the runtime path rules
    (absolute, resolved, no parent traversal), and it resolves outside the
    Claude plugin folder. The doctor never sets or repairs it.
+i  the blog repo's verifier copy (scripts/blogkit_verify.py) is a regular
+   file, not a symlink, byte-identical to the canonical verifier in the
+   install path (adapters/astro/blogkit_verify.py), and its VERIFIER_VERSION
+   header names the installed version. The engine CLI runs the same check
+   through check_verifier_copy(); its sync-verifier command repairs the copy.
 
 Each check is ok, fail or unknown. Unknown (could not verify: a command failed,
 timed out, or returned malformed data) counts as a failure, and any check that
@@ -50,6 +55,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -65,6 +71,10 @@ TAG_RE = re.compile(r"v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)")
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 MAX_JSON_BYTES = 4 * 1024 * 1024  # settings and registry files are small (DoS guard)
+VERIFIER_COPY = "scripts/blogkit_verify.py"
+VERIFIER_CANONICAL = "adapters/astro/blogkit_verify.py"
+MAX_VERIFIER_BYTES = 1024 * 1024
+VERIFIER_VERSION_RE = re.compile(rb'^VERIFIER_VERSION = "([^"\n]*)"$', re.MULTILINE)
 RUNTIME_PATHS = (
     Path(__file__).resolve().parent.parent / "skills" / "blog-google" / "scripts" / "runtime_paths.py"
 )
@@ -114,6 +124,45 @@ def _read_json(path: Path, missing: Exception, label: str):
         raise Unknown(f"{label} is not readable JSON") from None
 
 
+def _read_capped(path: Path, missing: Exception, label: str, cap: int) -> bytes:
+    """Read a regular file without following a symlink (CWE-59) or reading past cap."""
+    if path.is_symlink():
+        raise Fail(f"{label} is a symlink")
+    if path.is_dir():
+        raise Fail(f"{label} is not a regular file")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        raise missing from None
+    except OSError:
+        raise Unknown(f"{label} is not readable") from None
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise Fail(f"{label} is not a regular file")
+        data = handle.read(cap + 1)
+    if len(data) > cap:
+        raise Fail(f"{label} is larger than {cap} bytes")
+    return data
+
+
+def check_verifier_copy(blog: Path, install: Path, version: str) -> dict:
+    """Check i: the blog repo's verifier copy matches the install's canonical and version."""
+    canonical = _read_capped(
+        install / VERIFIER_CANONICAL, Unknown("canonical verifier not found in the install path"),
+        "canonical verifier", MAX_VERIFIER_BYTES,
+    )
+    copy = _read_capped(
+        blog / VERIFIER_COPY, Fail(f"verifier copy {VERIFIER_COPY} not found"), "verifier copy",
+        MAX_VERIFIER_BYTES,
+    )
+    if copy != canonical:
+        raise Fail("verifier copy differs from the installed canonical; run sync-verifier")
+    headers = VERIFIER_VERSION_RE.findall(copy)
+    if len(headers) != 1 or headers[0].decode("utf-8", "replace") != version:
+        raise Fail("verifier copy header does not name the installed version")
+    return {"verifier_copy": VERIFIER_COPY}
+
+
 def _run(command: list[str], cwd: Path, timeout: float, label: str) -> str:
     """Run an external command; any failure is Unknown and its output stays private."""
     try:
@@ -135,7 +184,7 @@ def _run(command: list[str], cwd: Path, timeout: float, label: str) -> str:
 IDENTITY_CHECKS = (
     "a_shared_settings", "b_cli_install", "c_registry", "d_version", "e_commit", "f_exec_path",
 )
-ALL_CHECKS = IDENTITY_CHECKS + ("g_python", "h_runtime_dir")
+ALL_CHECKS = IDENTITY_CHECKS + ("g_python", "h_runtime_dir", "i_verifier_copy")
 
 
 def default_registry() -> Path:
@@ -403,6 +452,11 @@ class Doctor:
             if resolved.is_relative_to(plugins):
                 raise Fail(f"{RUNTIME_VAR} resolves inside the Claude plugin folder")
         return {"runtime_dir": str(resolved)}
+
+    def check_i_verifier_copy(self) -> dict:
+        if self.cli is None:
+            raise Unknown("depends on b_cli_install")
+        return check_verifier_copy(self.blog, Path(self.cli["installPath"]).resolve(), self.cli["version"])
 
     def run(self, check_ids: tuple[str, ...] = ALL_CHECKS) -> list[dict]:
         results = []
