@@ -4,10 +4,11 @@
 
 This repository contains **Claude Blog**, a Claude Code skill suite for blog content
 creation, optimization, and management. It follows the Agent Skills open standard and the
-3-layer architecture (directive, orchestration, execution). 32 skill directories
-(1 orchestrator + 31 sub-skills), 30 user-facing `/blog` commands, 5 specialized
-subagents, 12 content templates, and 22 reference docs are dual-optimized for Google rankings
-(2026 core and spam update timeline, E-E-A-T) and AI citations (GEO/AEO). Includes FLOW framework
+3-layer architecture (directive, orchestration, execution). 33 skill directories
+(1 orchestrator + 31 sub-skills + the fork's `blog-doctor` install check), 30 user-facing
+`/blog` commands, 5 specialized subagents, 12 content templates, and 22 reference docs are
+dual-optimized for Google rankings (2026 core and spam update timeline, E-E-A-T) and AI
+citations (GEO/AEO). Includes FLOW framework
 integration, semantic topic-cluster planning + execution, multilingual publishing (Pro Hub
 Challenge v1.7.0), BRAND.md/VOICE.md/DISCOURSE.md project-root context auto-load (v1.8.0,
 fenced via `scripts/load_untrusted_root.py` with CSPRNG nonces, v1.8.3+), CI-enforced
@@ -50,8 +51,9 @@ claude-blog/
   scripts/check_google_currentness.py # Google update ledger vs official feeds
   scripts/sync_google_updates.py     # Google update ledger sync into the Blog Brain
   scripts/installer_ownership.py     # Shared Unix installer ownership engine
-  # 22 scripts/*.py in total: `ls scripts/*.py | wc -l`
-  skills/                            # 32 skill directories (1 orchestrator + 31 sub-skills)
+  scripts/doctor.py                  # blog-kit install doctor (fork)
+  # 23 scripts/*.py in total: `ls scripts/*.py | wc -l`
+  skills/                            # 33 skill directories (1 orchestrator + 31 sub-skills + blog-doctor)
     blog/SKILL.md                   # Main orchestrator, routing, scoring
       references/                   # 22 on-demand knowledge files (5 in v1.8.0, 1 in v1.9.0)
       templates/                    # 12 content templates
@@ -108,6 +110,7 @@ claude-blog/
     blog-discourse/SKILL.md        # Last-30-days discourse research (v1.8.0)
     blog-style/SKILL.md            # Author voice-profile learner (v1.10.0)
     blog-decay/SKILL.md            # GSC content-decay detector (v1.10.0)
+    blog-doctor/SKILL.md           # blog-kit install check `/blog-doctor` (fork, not routed)
   agents/                            # 5 specialized subagents
     blog-researcher.md              # Statistics and source research
     blog-writer.md                  # Content generation

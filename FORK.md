@@ -14,7 +14,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 
 - `FORK.md`: 이 문서. 업스트림 기준 커밋과 포크 변경 목록
 - `tests/test_fork_manifest.py`: 이 문서의 목록과 실제 변경(기준 대비 index와 작업 트리 각각)의 일치 검사. 얕은 clone에서만 skip, 기준 커밋이 없는 일반 clone은 실패
-- `tests/test_fork_identity.py`: 플러그인 이름·업스트림 author 유지, 포크 마켓 이름·owner와 기존 항목 유지 검사
+- `tests/test_fork_identity.py`: 플러그인 이름·업스트림 author 유지, 포크 마켓 이름·owner와 기존 항목 유지, LICENSE 업스트림 저작권 줄 유지, 포크가 고친 설명의 스킬 폴더 수 검사
 - `scripts/doctor.py`: 설치 점검. 블로그 레포가 고정한 버전과 실제 실행된 엔진(공유 설정, `claude plugin list --json`, 설치 레지스트리, 태그 커밋), 실행 경로, Python 버전, 런타임 경로를 검사해 JSON으로 출력. 확인할 수 없으면 실패. 이 블로그 레포의 설치는 레지스트리 `projectPath`로 먼저 골라 다른 레포의 project 설치와 구분하고, 런타임 경로는 기본·활성 Claude 플러그인 폴더 밖이고 폴더(또는 아직 없음)여야 함. 다른 마켓의 같은 이름 플러그인은 user 범위이거나, 레지스트리가 이 블로그 레포에 둔 project·local 설치일 때만 활성으로 봄(어느 레포 것인지 모르면 확인 불가). 설정·레지스트리 파일은 symlink를 따르지 않고 4MB까지만 읽으며, symlink인 `--blog-repo`는 거부
 - `skills/blog-doctor/SKILL.md`: 설치된 설치 점검 스크립트를 실행하고 결과를 보여 주는 스킬(`/blog-doctor`). 라우터 명령 표에는 넣지 않음. 다른 스킬과 달리 `CLAUDE_BLOG_SCRIPTS_DIR` override를 따르지 않고 설치본의 스크립트만 실행한다(점검 (f)가 실행 위치를 확인하므로, override로 다른 사본을 돌리면 점검이 뜻을 잃는다)
 - `tests/test_doctor.py`: 스텁 `claude`·`git`과 임시 블로그 레포·레지스트리로 설치 점검의 통과·실패 사례와 비밀 비노출 확인
@@ -26,9 +26,9 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 업스트림 파일을 직접 고친 곳. 업스트림 병합 때 충돌 후보다.
 
 - `.gitignore`: `/flow` 작업 폴더(`.scratch/`)와 외부 도구가 만드는 로컬 전용 Codex용 사본(`/AGENTS.md`, `/.agents/`) 제외
-- `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가
-- `.claude-plugin/marketplace.json`: 마켓 이름 `blog-kit`, owner를 포크 소유자로. 기존 항목(동반 플러그인 포함)은 그대로
-- `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.N`, repository·homepage를 포크 저장소로. 이름·author는 업스트림 그대로
+- `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가. 스킬 폴더 수(33)·스크립트 수(23)와 구조도에 `blog-doctor`·`scripts/doctor.py`
+- `.claude-plugin/marketplace.json`: 마켓 이름 `blog-kit`, owner를 포크 소유자로, `claude-blog` 설명의 스킬 폴더 수를 33개로. 기존 항목(동반 플러그인 포함)은 그대로
+- `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.N`, repository·homepage를 포크 저장소로, 설명의 스킬 폴더 수를 33개(`blog-doctor` 포함)로. 이름·author는 업스트림 그대로
 - `.github/ISSUE_TEMPLATE/config.yml`: 토론·보안 제보·문서 안내 URL을 포크 저장소로
 - `.github/SECURITY.md`: 보안 제보(Security Advisory) URL을 포크 저장소로
 - `CHANGELOG.md`: 맨 위에 포크 절과 포크 릴리스 항목
@@ -37,7 +37,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `README.md`: 맨 위 포크 설치 안내 블록(절차서 링크 포함). 나머지 본문은 업스트림 그대로
 - `pyproject.toml`: 버전 `2.3.1+kit.N`(PEP 440 로컬 버전), 프로젝트 URL을 포크로
 - `scripts/validate_public_release.py`: 업스트림 author 상수와 포크 배포 상수 분리, 버전 대응 규칙 `python_version()`, 독립 설치 스크립트 표면을 필수 검사에서 제외(아래 "릴리스 검사 범위 밖")
-- `skills/blog/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
+- `skills/blog/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`. 라우팅 절에 라우팅하지 않는 포크 스킬 `blog-doctor` 한 줄
 - `skills/blog-audio/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
 - `skills/blog-cluster/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
 - `skills/blog-flow/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
@@ -65,6 +65,10 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `docs/agents/issue-tracker.md`: 에이전트용 이슈 트래커 규칙
 - `docs/agents/triage-labels.md`: 에이전트용 triage 라벨 규칙
 - `GLOSSARY.md`: 포크 용어집
+
+## 업스트림 문서의 수량 문구
+
+README·`docs/`·`.github/CONTRIBUTING.md`·`brain/` 등 업스트림 문서 본문의 스킬 폴더 수("32 skill directories", "31 sub-skills")와 스크립트 수는 업스트림 기준 그대로 둔다. 포크가 덧붙인 `blog-doctor`와 `scripts/doctor.py`는 이 문서와, 포크가 이미 고친 설명(플러그인 매니페스트, 마켓 목록, `CLAUDE.md`, 라우터 SKILL.md)에만 반영한다. 업스트림 병합 때 충돌을 줄이려는 것이다.
 
 ## 버전 체계
 
