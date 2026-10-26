@@ -91,8 +91,7 @@ def test_recommendation_points_at_direct_path_and_cites_google(validate):
 
 
 def test_cli_json_reports_failure_and_recommendation(tmp_path):
-    settings = tmp_path / ".claude" / "settings.json"
-    settings.parent.mkdir()
+    settings = tmp_path / ".claude.json"
     settings.write_text(json.dumps({"mcpServers": {"nanobanana-mcp": {
         "command": "npx",
         "args": ["-y", "@ycse/nanobanana-mcp@1.1.1"],
@@ -100,7 +99,7 @@ def test_cli_json_reports_failure_and_recommendation(tmp_path):
     }}}))
     env = dict(os.environ, HOME=str(tmp_path))
     result = subprocess.run(
-        [sys.executable, str(VALIDATE), "--json"], capture_output=True, text=True,
+        [sys.executable, str(VALIDATE), "--global", "--json"], capture_output=True, text=True,
         env=env, cwd=tmp_path,
     )
     payload = json.loads(result.stdout)
@@ -194,7 +193,8 @@ def _plugin_root(root: Path) -> Path:
     (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "claude-blog"}))
     scripts = root / "skills" / "blog-image" / "scripts"
     scripts.mkdir(parents=True)
-    (scripts / SETUP.name).write_bytes(SETUP.read_bytes())
+    for script in (SETUP, VALIDATE):
+        (scripts / script.name).write_bytes(script.read_bytes())
     return scripts / SETUP.name
 
 
@@ -435,3 +435,54 @@ def test_copy_installed_under_one_custom_profile_is_recognised_from_another(worl
     result, payload = _run_target(world, installed, op, env_extra={"CLAUDE_CONFIG_DIR": str(profile_b)})
     assert result.returncode != 0 and payload["status"] == "error"
     assert _snapshot(world["tmp"]) == before
+
+
+# ---- validate_image_setup follows the same target rule (fork, spec S3) -------
+
+def _run_validate(world, script: Path, *target: str):
+    env = dict(os.environ, HOME=str(world["home"]))
+    for name in ("GOOGLE_AI_API_KEY", "CLAUDE_CONFIG_DIR"):
+        env.pop(name, None)
+    result = subprocess.run(
+        [sys.executable, str(script), *target, "--json"],
+        capture_output=True, text=True, env=env, cwd=world["blog"],
+    )
+    return result, json.loads(result.stdout)
+
+
+def _found(payload) -> dict:
+    return {c["label"]: c for c in payload["checks"]}["MCP config found"]
+
+
+def test_validator_in_an_installed_copy_without_a_target_refuses(world):
+    validate = world["installed"].with_name(VALIDATE.name)
+    result, payload = _run_validate(world, validate)
+    assert result.returncode != 0 and payload["status"] == "error"
+    assert "--project-dir" in payload["error"] and "--global" in payload["error"]
+
+
+@pytest.mark.parametrize("target", ["project", "global"])
+def test_validator_finds_the_server_where_setup_wrote_it(world, target):
+    args = ("--project-dir", str(world["blog"])) if target == "project" else ("--global",)
+    written = world["blog"] / ".mcp.json" if target == "project" else world["home"] / ".claude.json"
+    setup_result, _ = _run_target(world, world["installed"], "setup", *args)
+    assert setup_result.returncode == 0
+    validate = world["installed"].with_name(VALIDATE.name)
+    _, payload = _run_validate(world, validate, *args)
+    assert _found(payload)["passed"] is True
+    assert str(written) in _found(payload)["detail"]
+
+
+def test_validator_global_ignores_the_old_user_settings_location(world):
+    settings = world["home"] / ".claude" / "settings.json"
+    settings.write_text(json.dumps({"mcpServers": {"nanobanana-mcp": {"command": "npx"}}}))
+    validate = world["installed"].with_name(VALIDATE.name)
+    _, payload = _run_validate(world, validate, "--global")
+    assert _found(payload)["passed"] is False
+    assert "--global" in payload["recommendation"] or "--global" in _found(payload)["detail"]
+
+
+def test_validator_with_both_targets_is_an_error(world):
+    validate = world["installed"].with_name(VALIDATE.name)
+    result, payload = _run_validate(world, validate, "--project-dir", str(world["blog"]), "--global")
+    assert result.returncode != 0 and payload["status"] == "error"

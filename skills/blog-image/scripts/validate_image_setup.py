@@ -2,7 +2,9 @@
 """
 Validate that nanobanana-mcp is properly configured for claude-blog.
 
-Checks project .mcp.json first, then falls back to global ~/.claude/settings.json.
+Fork (blog-kit): reads the one config file setup_image_mcp.py would write,
+chosen by the same rule (--project-dir <blog repo> or --global; an installed
+copy given neither refuses). There is no fallback to another file.
 
 The pinned package (@ycse/nanobanana-mcp@1.1.1, the newest release) can only
 call two preview models that Google shut down on 2026-06-25, so a configured
@@ -18,12 +20,13 @@ Checks:
 5. Output directory exists or can be created
 
 Usage:
-    python3 validate_image_setup.py
-    python3 validate_image_setup.py --json
+    python3 validate_image_setup.py --project-dir <blog repo>
+    python3 validate_image_setup.py --global --json
 """
 
 import argparse
 import datetime
+import importlib.util
 import json
 import os
 import re
@@ -34,7 +37,10 @@ from pathlib import Path
 
 MCP_NAME = "nanobanana-mcp"
 OUTPUT_DIR = Path.home() / "Documents" / "nanobanana_generated"
-GLOBAL_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+SETUP_HINT = (
+    "Set it up with setup_image_mcp.py --project-dir <blog repo> or --global "
+    "(limited to the shut-down preview models)."
+)
 PINNED_PACKAGE = "@ycse/nanobanana-mcp@1.1.1"
 PINNED_PACKAGE_DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
 # Sources, fetched 2026-10-12:
@@ -95,27 +101,13 @@ RECOMMENDATION = (
 PLACEHOLDER_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
-def find_project_mcp_json() -> Path:
-    """Find the project-level .mcp.json by looking for .claude-plugin/plugin.json."""
-    current = Path(__file__).resolve().parent
-    for _ in range(10):
-        candidate = current / ".claude-plugin" / "plugin.json"
-        if candidate.exists():
-            return current / ".mcp.json"
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-    current = Path.cwd()
-    for _ in range(10):
-        candidate = current / ".claude-plugin" / "plugin.json"
-        if candidate.exists():
-            return current / ".mcp.json"
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-    return None
+def load_target_rule():
+    """Return setup_image_mcp.resolve_target, the one shared target rule."""
+    path = Path(__file__).resolve().with_name("setup_image_mcp.py")
+    spec = importlib.util.spec_from_file_location("setup_image_mcp", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.resolve_target
 
 
 def check(label: str, passed: bool, detail: str = "", results: list = None, quiet: bool = False) -> bool:
@@ -180,48 +172,45 @@ def validate_nanobanana_model(model: str, today: datetime.date = None) -> tuple:
     return False, f"{model} (unsupported by pinned {PINNED_PACKAGE}; accepts: {_supported_model_list()})"
 
 
-def find_mcp_config() -> tuple:
-    """Find MCP config. Returns (config_dict, path_label, error)."""
-    # Try project .mcp.json first
-    project_path = find_project_mcp_json()
-    if project_path and project_path.exists():
-        try:
-            with open(project_path) as f:
-                config = json.load(f)
-            if MCP_NAME in config.get("mcpServers", {}):
-                return config, f"project .mcp.json ({project_path})", None
-        except json.JSONDecodeError as exc:
-            return None, None, (
-                f"Invalid JSON in project .mcp.json ({project_path}): "
-                f"line {exc.lineno}, column {exc.colno}"
-            )
-        except OSError as exc:
-            return None, None, f"Cannot read project .mcp.json ({project_path}): {exc}"
-
-    # Fallback to global settings
-    if GLOBAL_SETTINGS_PATH.exists():
-        try:
-            with open(GLOBAL_SETTINGS_PATH) as f:
-                config = json.load(f)
-            if MCP_NAME in config.get("mcpServers", {}):
-                return config, f"global settings ({GLOBAL_SETTINGS_PATH})", None
-        except json.JSONDecodeError as exc:
-            return None, None, (
-                f"Invalid JSON in global settings ({GLOBAL_SETTINGS_PATH}): "
-                f"line {exc.lineno}, column {exc.colno}"
-            )
-        except OSError as exc:
-            return None, None, f"Cannot read global settings ({GLOBAL_SETTINGS_PATH}): {exc}"
-
-    return None, None, None
+def find_mcp_config(path: Path, use_global: bool) -> tuple:
+    """Read the target config. Returns (config_dict, path_label, error)."""
+    kind = "global .claude.json" if use_global else "project .mcp.json"
+    if not path.exists():
+        return None, None, None
+    try:
+        with open(path) as f:
+            config = json.load(f)
+    except json.JSONDecodeError as exc:
+        return None, None, (
+            f"Invalid JSON in {kind} ({path}): line {exc.lineno}, column {exc.colno}"
+        )
+    except OSError as exc:
+        return None, None, f"Cannot read {kind} ({path}): {exc}"
+    if not isinstance(config, dict) or MCP_NAME not in config.get("mcpServers", {}):
+        return None, None, None
+    return config, f"{kind} ({path})", None
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate nanobanana-mcp setup")
+    parser.add_argument("--project-dir", help="Blog repo folder whose .mcp.json is checked")
+    parser.add_argument(
+        "--global", dest="global_scope", action="store_true",
+        help="Check the user-scope MCP servers in ~/.claude.json",
+    )
     parser.add_argument("--json", action="store_true", help="Output structured JSON")
     args = parser.parse_args()
     quiet = args.json
     checks = []
+    try:
+        target, use_global = load_target_rule()(args.project_dir, args.global_scope)
+    except ValueError as exc:
+        message = str(exc).replace("Nothing was written.", "Nothing was checked.")
+        if args.json:
+            print(json.dumps({"status": "error", "error": message, "checks": []}, indent=2))
+        else:
+            print(f"Error: {message}")
+        return 2
 
     if not quiet:
         print("claude-blog - Image Generation Setup Validation")
@@ -229,7 +218,7 @@ def main() -> int:
     results = []
 
     # 1-2. Find and load config
-    config, config_label, config_error = find_mcp_config()
+    config, config_label, config_error = find_mcp_config(target, use_global)
 
     if config_error:
         results.append(check("MCP config parseable", False, config_error, checks, quiet))
@@ -243,7 +232,7 @@ def main() -> int:
         results.append(check(
             "MCP config found",
             False,
-            "Not found in project .mcp.json or global settings.json",
+            f"No {MCP_NAME} entry in {target}. {SETUP_HINT}",
             checks,
             quiet,
         ))
@@ -255,8 +244,6 @@ def main() -> int:
             }, indent=2))
         else:
             print(f"\n{RECOMMENDATION}")
-            print("MCP setup (limited to the shut-down preview models): "
-                  "python3 skills/blog-image/scripts/setup_image_mcp.py")
         return 1
 
     results.append(check("MCP config found", True, config_label, checks, quiet))

@@ -340,7 +340,7 @@ image capability configuration, and it needs the user's explicit yes first.
      kept). Use one of the two, never both
    - Without either, an installed copy refuses and writes nothing
    - `--check` and `--remove` take the same `--project-dir` or `--global`
-2. Verify: `python3 "$BLOG_SKILLS_DIR/blog-image/scripts/validate_image_setup.py"`
+2. Verify with the same target: `python3 "$BLOG_SKILLS_DIR/blog-image/scripts/validate_image_setup.py" --project-dir "<blog repo>"` (or `--global`)
 3. Requires Node.js 18+ (npx).
 4. **Caveat:** the script pins `@ycse/nanobanana-mcp@1.1.1`. That npm
    release hard-codes preview image model IDs that Google shut down on
