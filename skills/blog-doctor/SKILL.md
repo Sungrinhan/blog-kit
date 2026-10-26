@@ -28,6 +28,9 @@ BLOG_KIT_DOCTOR="${CLAUDE_SKILL_DIR}/../../scripts/doctor.py"
 python3 "$BLOG_KIT_DOCTOR" --blog-repo "<blog repo>"
 ```
 
+Do not substitute `CLAUDE_BLOG_SCRIPTS_DIR` here, unlike other skills: the
+doctor must run from the installed copy, which check `f_exec_path` verifies.
+
 It prints one JSON object and exits 0 only when every check is `ok`. A check
 that is `unknown` could not be verified and counts as a failure.
 

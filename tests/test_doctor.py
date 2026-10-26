@@ -92,6 +92,9 @@ class World:
         self.git_rc = 0
         self.claude_sleep = 0
         self.env = {"CLAUDE_BLOG_RUNTIME_DIR": str(self.runtime), "LEAKY_SECRET": PLANTED_VALUE}
+        self.blog_arg: Path | None = None
+        self.shared_real: Path | None = None
+        self.registry_real: Path | None = None
 
     def _stub(self, name: str, out: Path, rc: int, sleep: int) -> Path:
         calls = self.tmp / f"{name}-calls.txt"
@@ -111,11 +114,15 @@ class World:
         shared = self.blog / ".claude" / "settings.json"
         if self.shared is None:
             shared.unlink(missing_ok=True)
+        elif self.shared_real is not None:
+            self.shared_real.write_text(json.dumps(self.shared))
+            shared.unlink(missing_ok=True)
+            shared.symlink_to(self.shared_real)
         else:
             shared.write_text(json.dumps(self.shared))
         if self.local is not None:
             (self.blog / ".claude" / "settings.local.json").write_text(json.dumps(self.local))
-        self.registry.write_text(json.dumps(self.registry_data))
+        (self.registry_real or self.registry).write_text(json.dumps(self.registry_data))
         cli_out = self.tmp / "claude-out.json"
         cli_out.write_text(self.cli if isinstance(self.cli, str) else json.dumps(self.cli))
         git_out = self.tmp / "git-out.txt"
@@ -125,7 +132,7 @@ class World:
         env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CLAUDE_BLOG_RUNTIME_DIR")}
         env.update(HOME=str(self.home), **self.env)
         result = subprocess.run(
-            [sys.executable, str(script or self.script), "--blog-repo", str(self.blog),
+            [sys.executable, str(script or self.script), "--blog-repo", str(self.blog_arg or self.blog),
              "--claude", str(claude), "--git", str(git), "--timeout", "2"],
             capture_output=True, text=True, env=env, cwd=self.tmp, timeout=60,
         )
@@ -192,6 +199,15 @@ def _version(w: World, version: str) -> None:
     _entry(w)["version"] = version
 
 
+def _registry_symlink(w: World) -> None:
+    w.registry_real = w.tmp / "registry-real.json"
+    w.registry.symlink_to(w.registry_real)
+
+
+def _oversize_local(w: World) -> None:
+    w.local["env"]["PADDING"] = "x" * (5 * 1024 * 1024)
+
+
 OTHER_SHA = "d" * 40
 TAG_REF = f"refs/tags/{TAG}"
 def _other_project(w: World, shared_cache: bool) -> None:
@@ -203,7 +219,24 @@ def _other_project(w: World, shared_cache: bool) -> None:
     )
 
 
+UPSTREAM_ID = "claude-blog@agricidaniel-blog"
+
+
+def _upstream_project(w: World, project: Path | None) -> None:
+    """The upstream plugin installed at project scope; project=None leaves no registry entry."""
+    install = w.cache / "agricidaniel-blog" / "claude-blog" / "2.3.1"
+    w.cli.append({"id": UPSTREAM_ID, "version": "2.3.1", "scope": "project", "enabled": True,
+                  "installPath": str(install), "projectEnabled": True})
+    if project is not None:
+        w.registry_data["plugins"][UPSTREAM_ID] = [{
+            "scope": "project", "projectPath": str(project), "installPath": str(install),
+            "version": "2.3.1",
+        }]
+
+
 PASSING = {
+    "upstream plugin installed at project scope only in another repo": lambda w: _upstream_project(
+        w, w.tmp / "other-repo"),
     "another repo has its own project install": lambda w: _other_project(w, shared_cache=False),
     "another repo shares the same cached install": lambda w: _other_project(w, shared_cache=True),
     "annotated tag (two lines) compares the peeled commit": lambda w: setattr(
@@ -250,6 +283,10 @@ FAILING = {
         lambda w: w.cli.append({"id": "claude-blog@agricidaniel-blog", "version": "2.3.1", "scope": "user",
                                 "enabled": True, "installPath": "/elsewhere", "projectEnabled": False}),
         "b_cli_install", "fail"),
+    "upstream plugin installed at project scope in this blog repo": (
+        lambda w: _upstream_project(w, w.blog), "b_cli_install", "fail"),
+    "project-scope upstream plugin that no registry entry places": (
+        lambda w: _upstream_project(w, None), "b_cli_install", "unknown"),
     "CLI install has no registry entry": (
         lambda w: _entry(w).update(installPath=str(w.tmp / "other")), "c_registry", "fail"),
     "registry entry duplicated": (
@@ -265,6 +302,8 @@ FAILING = {
     "claude times out": (lambda w: setattr(w, "claude_sleep", 5), "b_cli_install", "unknown"),
     "claude prints invalid JSON": (lambda w: setattr(w, "cli", f"oops {PLANTED_VALUE}"), "b_cli_install", "unknown"),
     "claude entry missing installPath": (lambda w: _ours(w).pop("installPath"), "b_cli_install", "unknown"),
+    "registry is a symlink": (_registry_symlink, "c_registry", "unknown"),
+    "per-device settings larger than the size cap": (_oversize_local, "h_runtime_dir", "unknown"),
     "runtime dir not in per-device settings": (lambda w: setattr(w, "local", None), "h_runtime_dir", "fail"),
     "runtime dir not in process environment": (
         lambda w: w.env.pop("CLAUDE_BLOG_RUNTIME_DIR"), "h_runtime_dir", "fail"),
@@ -317,3 +356,20 @@ def test_no_secret_reaches_stdout_or_stderr(world: World, case: str) -> None:
     FAILING[case][0](fresh)
     rc, _, output = fresh.run()
     assert rc == 1 and PLANTED_VALUE not in output
+
+
+def test_shared_settings_symlink_is_not_followed(world: World) -> None:
+    world.shared_real = world.tmp / "settings-real.json"
+    rc, payload, _ = world.run()
+    assert _statuses(payload)["a_shared_settings"] == "unknown"
+    assert "symlink" in {c["id"]: c for c in payload["checks"]}["a_shared_settings"]["reason"]
+    assert rc == 1
+
+
+def test_blog_repo_argument_that_is_a_symlink_is_refused(world: World) -> None:
+    world.blog_arg = world.tmp / "blog-link"
+    world.blog_arg.symlink_to(world.blog)
+    rc, payload, _ = world.run()
+    assert rc == 2
+    assert payload["status"] == "error" and "symlink" in payload["error"]
+    assert world.calls("claude") == []

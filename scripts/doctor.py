@@ -8,6 +8,8 @@ a  shared settings (.claude/settings.json) enable claude-blog@blog-kit from the
    fork marketplace pinned to a v<version> tag
 b  `claude plugin list --json`, run in the blog repo, shows exactly one enabled
    project-scope install, and no claude-blog from another marketplace is active
+   here (user scope, or a project or local install the registry places in this
+   blog repo; one it places in no repo is unknown)
 c  the installed-plugins registry holds exactly one project-scope entry whose
    projectPath is this blog repo, it connects to the CLI install by id, scope
    and installPath, and its version agrees with the CLI. Installs of the same
@@ -25,7 +27,9 @@ h  CLAUDE_BLOG_RUNTIME_DIR is set in .claude/settings.local.json and in this
 
 Each check is ok, fail or unknown. Unknown (could not verify: a command failed,
 timed out, or returned malformed data) counts as a failure, and any check that
-is not ok exits 1. Output is one JSON object limited to check ids, statuses,
+is not ok exits 1. A --blog-repo that is a symlink is refused (exit 2), and
+settings and registry files that are symlinks or larger than 4 MB are not
+read (unknown). Output is one JSON object limited to check ids, statuses,
 short reasons, versions, SHAs, scope, enabled and the blog repo, install and
 runtime paths. It never prints environment variables, settings or registry
 contents, MCP definitions, or external command output. Nothing is written.
@@ -38,6 +42,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import errno
 import importlib.util
 import json
 import os
@@ -57,6 +62,7 @@ RUNTIME_VAR = "CLAUDE_BLOG_RUNTIME_DIR"
 TAG_RE = re.compile(r"v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)")
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+MAX_JSON_BYTES = 4 * 1024 * 1024  # settings and registry files are small (DoS guard)
 RUNTIME_PATHS = (
     Path(__file__).resolve().parent.parent / "skills" / "blog-google" / "scripts" / "runtime_paths.py"
 )
@@ -85,11 +91,24 @@ def _same_path(a: str, b: str) -> bool:
 
 
 def _read_json(path: Path, missing: Exception, label: str):
+    """Read a small JSON file without following a symlink (CWE-59) or reading past the cap."""
+    if path.is_symlink():
+        raise Unknown(f"{label} is a symlink; not followed")
     if not path.is_file():
         raise missing
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise Unknown(f"{label} is a symlink; not followed") from None
+        raise Unknown(f"{label} is not readable JSON") from None
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(MAX_JSON_BYTES + 1)
+    if len(data) > MAX_JSON_BYTES:
+        raise Unknown(f"{label} is larger than {MAX_JSON_BYTES} bytes")
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise Unknown(f"{label} is not readable JSON") from None
 
 
@@ -122,6 +141,7 @@ class Doctor:
         self.cli: dict | None = None
         self.entry: dict | None = None
         self._registry_cache: dict | None = None
+        self._registry_data: dict | None = None
 
     def check_a_shared_settings(self) -> dict:
         settings = _read_json(
@@ -170,7 +190,8 @@ class Doctor:
             if not isinstance(entry.get("enabled"), bool):
                 raise Unknown(f"claude plugin list: {PLUGIN_NAME} entry has no enabled field")
             if market != MARKETPLACE:
-                if entry["enabled"] or entry.get("projectEnabled") is True:
+                active = entry["enabled"] or entry.get("projectEnabled") is True
+                if active and self._active_here(plugin_id, entry):
                     raise Fail(f"{PLUGIN_NAME} from another marketplace is active here")
                 continue
             for field in ("version", "scope", "installPath"):
@@ -202,14 +223,47 @@ class Doctor:
         self.cli = entry
         return fields
 
+    def _active_here(self, plugin_id: str, entry: dict) -> bool:
+        """Whether an active same-name plugin from another marketplace applies to this blog repo.
+
+        A user-scope install applies everywhere. The CLI also lists other
+        repos' project and local installs, so those count only when the
+        registry places one in this blog repo.
+        """
+        if entry.get("scope") not in ("project", "local"):
+            return True
+        entries = self._registry_list(plugin_id)
+        if any(
+            e.get("scope") in ("project", "local") and isinstance(e.get("projectPath"), str)
+            and _same_path(e["projectPath"], str(self.blog))
+            for e in entries
+        ):
+            return True
+        install = entry.get("installPath")
+        if isinstance(install, str) and any(
+            isinstance(e.get("installPath"), str) and _same_path(e["installPath"], install)
+            for e in entries
+        ):
+            return False
+        raise Unknown(f"cannot tell which repo the {plugin_id} {entry['scope']} install belongs to")
+
+    def _registry_list(self, plugin_id: str) -> list[dict]:
+        """The registry's install entries for one plugin id (empty when it has none)."""
+        if self._registry_data is None:
+            data = _read_json(self.registry, Unknown("installed-plugins registry not found"), "registry")
+            plugins = data.get("plugins") if isinstance(data, dict) else None
+            if not isinstance(plugins, dict):
+                raise Unknown("registry has no plugin list")
+            self._registry_data = plugins
+        entries = self._registry_data.get(plugin_id, [])
+        if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+            raise Unknown("registry has no plugin list")
+        return entries
+
     def _registry_entry(self) -> dict:
         """This blog repo's project-scope registry entry for the plugin."""
         if self._registry_cache is None:
-            data = _read_json(self.registry, Unknown("installed-plugins registry not found"), "registry")
-            plugins = data.get("plugins") if isinstance(data, dict) else None
-            entries = plugins.get(PLUGIN_ID, []) if isinstance(plugins, dict) else None
-            if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
-                raise Unknown("registry has no plugin list")
+            entries = self._registry_list(PLUGIN_ID)
             mine = []
             for e in entries:
                 if e.get("scope") != "project":
@@ -375,6 +429,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.blog_repo and Path(args.blog_repo).is_symlink():
+        print(json.dumps({"status": "error", "error": "--blog-repo is a symlink; pass the real folder"}, indent=2))
+        return 2
     blog = Path(args.blog_repo or Path.cwd()).resolve()
     registry = Path(args.registry) if args.registry else claude_config_dir() / "plugins" / "installed_plugins.json"
     doctor = Doctor(
