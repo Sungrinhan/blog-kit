@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 포크 이름·버전으로 배포: 마켓 `blog-kit`(owner Sungrinhan), 플러그인 `claude-blog@blog-kit`, 버전 `2.3.1-kit.1`(Python 패키지 `2.3.1+kit.1`). 플러그인 이름과 author는 업스트림 그대로.
 - 저장소·이슈·보안 안내 URL을 포크 저장소로. README 맨 위에 포크 설치 안내, LICENSE에 포크 저작권 줄.
 - 릴리스 검사기: 업스트림 author 상수와 포크 배포 상수를 나누고, 버전은 `-kit.N`과 `+kit.N`을 하나의 규칙으로 대응. 지원하지 않는 독립 설치 스크립트 표면은 필수 검사에서 제외.
+- **호환성 변경** 이미지 MCP 설정 도우미(`setup_image_mcp.py`)와 설정 확인(`validate_image_setup.py`)이 대상을 `--project-dir <블로그 레포>`(그 폴더의 `.mcp.json`) 또는 `--global` 중 하나로 받는다. 설치본에서 둘 다 없이 실행하면 오류로 멈추고 아무것도 쓰거나 읽지 않는다. 전역 대상은 `~/.claude/settings.json`이 아니라 사용자 범위 MCP를 실제로 읽는 `~/.claude.json`(`CLAUDE_CONFIG_DIR`가 있으면 그 폴더)이고, 다른 키·서버는 보존한다. 예전 위치로 넘어가는 동작은 없다.
+- 스킬 폴더 수 설명을 33개(`blog-doctor` 포함)로. 업스트림 문서 본문의 수량 문구는 그대로(`FORK.md`).
 
 ## [Unreleased]
 
