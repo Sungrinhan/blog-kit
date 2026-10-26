@@ -18,6 +18,10 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `scripts/doctor.py`: 설치 점검. 블로그 레포가 고정한 버전과 실제 실행된 엔진(공유 설정, `claude plugin list --json`, 설치 레지스트리, 태그 커밋), 실행 경로, Python 버전, 런타임 경로를 검사해 JSON으로 출력. 확인할 수 없으면 실패. 이 블로그 레포의 설치는 레지스트리 `projectPath`로 먼저 골라 다른 레포의 project 설치와 구분하고, 런타임 경로는 기본·활성 Claude 플러그인 폴더 밖이고 폴더(또는 아직 없음)여야 함. 다른 마켓의 같은 이름 플러그인은 user 범위이거나, 레지스트리가 이 블로그 레포에 둔 project·local 설치일 때만 활성으로 봄(어느 레포 것인지 모르면 확인 불가). 설정·레지스트리 파일은 symlink를 따르지 않고 4MB까지만 읽으며, symlink인 `--blog-repo`는 거부. 설치 신원 검사(a~f)는 `identity_checks()`로 다른 설치 스크립트(엔진 CLI)가 불러 쓸 수 있고, 이때 실행 경로 검사는 부른 스크립트의 경로로 판정
 - `skills/blog-doctor/SKILL.md`: 설치된 설치 점검 스크립트를 실행하고 결과를 보여 주는 스킬(`/blog-doctor`). 라우터 명령 표에는 넣지 않음. 다른 스킬과 달리 `CLAUDE_BLOG_SCRIPTS_DIR` override를 따르지 않고 설치본의 스크립트만 실행한다(점검 (f)가 실행 위치를 확인하므로, override로 다른 사본을 돌리면 점검이 뜻을 잃는다)
 - `tests/test_doctor.py`: 스텁 `claude`·`git`과 임시 블로그 레포·레지스트리로 설치 점검의 통과·실패 사례와 비밀 비노출 확인
+- `adapters/astro/blogkit_verify.py`: 발행 검증기 정본(stdlib). 블로그 레포는 바이트가 같은 사본을 빌드 전·배포 직전에 실행한다. 소스 모드는 공개 글(`draft: false`)마다 경로(`src/content/posts/<slug>.md`, mdx·하위 폴더 거부)·공개본 프론트매터 문법·글 전용 자산 규칙·내용 해시(`blogkit-content-v1`)·발행 증거 계약 1(지원 계약이면 과거 엔진 버전 증거도 통과)의 완전성을 확인하고, 문법 밖 파일은 `draft: true` 한 줄일 때만 초안으로 인정. `BLOGKIT_INCLUDE_DRAFTS`가 있으면 실패. 경로의 symlink 거부·읽기 크기 제한, 출력에 본문·URL 없음. 파일 머리의 `VERIFIER_VERSION`은 엔진 버전, `SELF_DIGEST`는 그 값을 0으로 바꾼 파일의 SHA-256이고(check_secrets가 내용 digest로 판정하는 `"sha256": "<hex>"` 모양) 실행마다 확인한다(파일을 고치면 `self_digest()`로 다시 계산해 새긴다)
+- `tests/test_blogkit_verify.py`: 임시 블로그 레포로 검증기 소스 모드의 통과·실패 사례, 증거 계약 위반, 자기 digest, 해시 직렬화(손으로 만든 예시와 골든 벡터) 확인
+- `tests/fixtures/blogkit/hash-vectors.json`: 내용 해시 골든 벡터. 한 번 생성해 고정한 값이라, 바뀌면 이미 발행한 글의 해시가 바뀐다는 뜻
+- `tests/test_adapters_release_scope.py`: 업스트림 릴리스 검사기가 보지 않는 `adapters/`에 같은 금지 문자열·설치 스크립트 링크 검사를 적용
 - `docs/BLOG-KIT-UPGRADE.md`: 블로그 레포 설정 예시와 설치·업그레이드·다운그레이드 순서, uninstall 금지, 런타임 경로 첫 전환, 보존 확인
 - `docs/BLOG-KIT-HUMAN-CHECK.md`: 두 기기 설치·전환 사람 검증 기록 양식과 단계별 기대 설치 점검 결과
 

@@ -1,0 +1,103 @@
+{
+  "about": "Golden vectors for blogkit-content-v1. Generated once from the verifier and frozen: a change here means already published posts would change hash.",
+  "cases": [
+    {
+      "name": "post only, public",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\n---\n\nBody.\n",
+      "assets": {},
+      "content_sha256": "d3f6b637eed1acea44f088220b346fc61059f270a25a0fafa94975065f6a7dd0"
+    },
+    {
+      "name": "post only, draft (same hash as public)",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: true\n---\n\nBody.\n",
+      "assets": {},
+      "content_sha256": "d3f6b637eed1acea44f088220b346fc61059f270a25a0fafa94975065f6a7dd0"
+    },
+    {
+      "name": "assets sorted by UTF-8 bytes",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\n---\n\nBody.\n",
+      "assets": {
+        "src/assets/posts/sample/a.png": "1",
+        "src/assets/posts/sample/a-b.png": "2",
+        "src/assets/posts/sample/a_b.png": "3",
+        "src/assets/posts/sample/b.svg": "<svg/>"
+      },
+      "content_sha256": "935d37ed296a069c8d27a3c18b6e8255f0817306e02c85a28593dadbcf7647f6"
+    },
+    {
+      "name": "empty asset file",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\n---\n\nBody.\n",
+      "assets": {
+        "src/assets/posts/sample/empty.png": ""
+      },
+      "content_sha256": "3942133def48d9424d43de9f37da13a3e47ed2cc6f3ccd9a0ef4136ead4bd61f"
+    },
+    {
+      "name": "draft-like line in the body is not counted",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\n---\n\nBody.\ndraft: true\n",
+      "assets": {},
+      "content_sha256": "ea40ac7c3c13840d5d5980066dec137e01194977066267de4a16bd641cc2fe59"
+    },
+    {
+      "name": "non-ASCII body",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\n---\n\n\ubcf8\ubb38\uc785\ub2c8\ub2e4. \u2713\n",
+      "assets": {},
+      "content_sha256": "1fb06634652e7b58e49d4cfcd47741351d70c789840fe9f45e48d102dd55314b"
+    },
+    {
+      "name": "closing marker at end of file",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\n---",
+      "assets": {},
+      "content_sha256": "050366163f791566e421c11594b4233fa54d457f2cb81117b8bbb90ef879937c"
+    },
+    {
+      "name": "CRLF line endings",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\r\ntitle: \"Sample\"\r\ndescription: \"d\"\r\npubDate: \"2026-10-26\"\r\ntags: []\r\ndraft: false\r\n---\r\n\r\nBody.\r\n",
+      "assets": {},
+      "error": "frontmatter_missing"
+    },
+    {
+      "name": "BOM",
+      "post_path": "src/content/posts/sample.md",
+      "post": "\ufeff---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\n---\n\nBody.\n",
+      "assets": {},
+      "error": "frontmatter_missing"
+    },
+    {
+      "name": "no closing marker",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\nBody.\n",
+      "assets": {},
+      "error": "frontmatter_unclosed"
+    },
+    {
+      "name": "two draft lines",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\ndraft: false\ndraft: true\n---\n\nBody.\n",
+      "assets": {},
+      "error": "draft_line_count"
+    },
+    {
+      "name": "no draft line",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\n---\n\nBody.\n",
+      "assets": {},
+      "error": "draft_line_count"
+    },
+    {
+      "name": "quoted draft key is not the draft line",
+      "post_path": "src/content/posts/sample.md",
+      "post": "---\ntitle: \"Sample\"\ndescription: \"d\"\npubDate: \"2026-10-26\"\ntags: []\n\"draft\": false\n---\n\nBody.\n",
+      "assets": {},
+      "error": "draft_line_count"
+    }
+  ]
+}
