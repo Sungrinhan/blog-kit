@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 이 절은 포크(blog-kit) 릴리스 기록이다. 업스트림 기준 커밋과 포크 변경 목록은 [`FORK.md`](FORK.md)에 있다. 아래 `[Unreleased]`부터는 업스트림 기록 그대로다.
 
+### [2.3.1-kit.2] - 2026-10-26
+
+- 버전만 올림(기능 변경 없음). 업그레이드·다운그레이드 확인용 두 번째 릴리스.
+
 ### [2.3.1-kit.1] - 2026-10-25
 
 #### Added
