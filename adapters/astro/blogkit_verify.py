@@ -28,6 +28,27 @@ publish it. BLOGKIT_INCLUDE_DRAFTS (the local preview switch) fails source
 mode whenever it is set, since every build that runs this check writes the
 deployable output.
 
+Deploy output mode (--dist FOLDER) runs source mode, then checks the built
+site the deploy command is about to upload:
+
+- no symlink on the folder (or on any component of a relative path) or
+  anywhere inside it, only regular files and folders, at most 20000 entries,
+  HTML and XML files at most 5MB each
+- the home page, posts/index.html, rss.xml, sitemap-index.xml and every
+  sub-sitemap it lists exist, even with no public posts
+- post pages are posts/<slug>/index.html only, and their slugs are exactly
+  the public posts that passed source mode
+- every URL in rss.xml and the sitemaps shares the origin of the first
+  sitemap-index URL, maps to <path>/index.html inside the folder, and, when it
+  is a post URL, names a verified public post; sub-sitemaps are root
+  sitemap-<number>.xml files followed one level deep; XML with a DOCTYPE or
+  entity declaration is refused
+- no inbox/ or .blogkit/ folder, evidence file, review, state, claims or
+  approval record, or .md/.mdx draft source ships
+
+--ci is the strict mode for CI and WORKERS_CI deploys: the preview switch
+fails even when set to an empty or "0" value.
+
 Content hash (blogkit-content-v1, SHA-256): a fixed header, then the post and
 each asset as (kind, path length and bytes, content length and bytes), the
 post first and the assets sorted by the UTF-8 bytes of their repo-relative
@@ -44,6 +65,7 @@ repo-relative paths. It never prints post text, URLs or evidence contents.
 
 Usage:
     python3 blogkit_verify.py [--repo PATH]
+    python3 blogkit_verify.py --ci --dist dist
 """
 
 from __future__ import annotations
@@ -55,10 +77,12 @@ import os
 import re
 import stat
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 VERIFIER_VERSION = "2.3.1-kit.2"
-SELF_DIGEST = {"sha256": "c599f23baa750f75cc192746168239d392b28ce0fb403a4cdf31685805a8b981"}
+SELF_DIGEST = {"sha256": "f7e352bc5588e1f291b7c030e6c380492289caf14aa5385cc2b4db2b356d8931"}
 
 HASH_ALGO = "blogkit-content-v1"
 HASH_HEADER = b"blogkit-content-v1\n"
@@ -68,6 +92,13 @@ ASSETS_DIR = "src/assets/posts"
 INBOX_DIR = "inbox"
 EVIDENCE_NAME = "publish-evidence.json"
 PREVIEW_VAR = "BLOGKIT_INCLUDE_DRAFTS"
+DIST_PREFIX = "dist:"
+REQUIRED_PAGES = ("index.html", "posts/index.html", "rss.xml")
+PRIVATE_FOLDERS = frozenset({INBOX_DIR, ".blogkit"})
+PRIVATE_NAMES = frozenset({EVIDENCE_NAME, "state.md", "review.md", "claims.json", "approval.json"})
+SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+SUB_SITEMAP_RE = re.compile(r"sitemap-[0-9]+\.xml")
+DOCTYPE_RE = re.compile(rb"<!(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 
 MAX_POST_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 10 * 1024 * 1024
@@ -75,6 +106,7 @@ MAX_ASSETS_TOTAL = 50 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_SELF_BYTES = 1024 * 1024
 MAX_ENTRIES = 20000
+MAX_PAGE_BYTES = 5 * 1024 * 1024
 
 SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 MAX_SLUG = 80
@@ -470,10 +502,10 @@ def _check_public(root: Path, relative: str, data: bytes) -> str:
     return slug
 
 
-def verify_source(root: Path, environ=os.environ) -> tuple[list[str], list[dict]]:
-    """Return (public slugs, errors) for the blog repo's posts."""
+def verify_source(root: Path, environ=os.environ, strict: bool = False) -> tuple[list[str], list[dict]]:
+    """Return (public slugs, errors) for the blog repo's posts (strict: the preview switch in any form)."""
     errors: list[dict] = []
-    if environ.get(PREVIEW_VAR):
+    if environ.get(PREVIEW_VAR) or (strict and PREVIEW_VAR in environ):
         errors.append({"code": "preview_drafts_enabled", "path": ""})
     public: list[str] = []
     try:
@@ -490,6 +522,190 @@ def verify_source(root: Path, environ=os.environ) -> tuple[list[str], list[dict]
         except OSError:
             errors.append({"code": "unreadable_file", "path": relative})
     return sorted(public), errors
+
+
+# ---------------------------------------------------------------- deploy output mode
+
+
+def _dist_files(dist: Path) -> list[str]:
+    """Every file under the deploy output (dist-relative), refusing symlinks and odd entries."""
+    found: list[str] = []
+    count = 0
+    stack = [dist]
+    while stack:
+        folder = stack.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            raise VerifyError("unreadable_file", folder.relative_to(dist).as_posix()) from None
+        for entry in entries:
+            count += 1
+            if count > MAX_ENTRIES:
+                raise VerifyError("too_many_entries")
+            relative = Path(entry.path).relative_to(dist).as_posix()
+            try:
+                if entry.is_symlink():
+                    raise VerifyError("symlink_refused", relative)
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise VerifyError("not_a_regular_file", relative)
+                size = entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                raise VerifyError("unreadable_file", relative) from None
+            if entry.name.endswith((".html", ".xml")) and size > MAX_PAGE_BYTES:
+                raise VerifyError("file_too_large", relative)
+            found.append(relative)
+    return sorted(found)
+
+
+def _dist_error(code: str, relative: str = "") -> dict:
+    return {"code": code, "path": f"{DIST_PREFIX}{relative}"}
+
+
+def _is_private(relative: str) -> bool:
+    """Whether a deploy output file is blog-kit working state that must never ship."""
+    parts = relative.split("/")
+    return (any(part in PRIVATE_FOLDERS for part in parts[:-1]) or parts[-1] in PRIVATE_NAMES
+            or parts[-1].endswith((".md", ".mdx")))
+
+
+def _built_posts(files: list[str]) -> tuple[set[str], list[dict]]:
+    """Slugs of the post pages (posts/<slug>/index.html) and any other file under posts/."""
+    slugs: set[str] = set()
+    errors: list[dict] = []
+    for relative in files:
+        parts = relative.split("/")
+        if parts[0] != "posts" or relative == "posts/index.html":
+            continue
+        if len(parts) == 3 and parts[2] == "index.html" and SLUG_RE.fullmatch(parts[1]):
+            slugs.add(parts[1])
+        else:
+            errors.append(_dist_error("dist_post_path_invalid", relative))
+    return slugs, errors
+
+
+def _read_xml(dist: Path, relative: str) -> ET.Element:
+    """Parse a feed or sitemap, refusing DOCTYPE and entity declarations before expat sees them."""
+    data = _read_capped(dist, relative, MAX_PAGE_BYTES)
+    if DOCTYPE_RE.search(data):
+        raise VerifyError("dist_xml_doctype", relative)
+    try:
+        return ET.fromstring(data)
+    except ET.ParseError:
+        raise VerifyError("dist_xml_invalid", relative) from None
+
+
+def _text(element: ET.Element) -> str:
+    return (element.text or "").strip()
+
+
+def _origin(url: str) -> tuple[str, str]:
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc or "@" in parts.netloc:
+        return ("", "")
+    return (parts.scheme, parts.netloc.lower())
+
+
+def _url_segments(url: str, origin: tuple[str, str], source: str) -> list[str]:
+    """The decoded path segments of a same-origin URL that stays inside the output."""
+    if _origin(url) == ("", "") or _origin(url) != origin:
+        raise VerifyError("dist_url_origin", source)
+    path = unquote(urlsplit(url).path)
+    if not path.startswith("/") or "\\" in path or "\0" in path:
+        raise VerifyError("dist_url_path_invalid", source)
+    inner = path.strip("/")
+    segments = inner.split("/") if inner else []
+    if any(part in ("", ".", "..") for part in segments):
+        raise VerifyError("dist_url_path_invalid", source)
+    return segments
+
+
+def _sitemap_urls(dist: Path) -> tuple[tuple[str, str], list[tuple[str, str]]]:
+    """The site origin and (sitemap file, page URL) for every page the sitemap index reaches."""
+    index = _read_xml(dist, "sitemap-index.xml")
+    if index.tag != f"{SITEMAP_NS}sitemapindex":
+        raise VerifyError("dist_xml_invalid", "sitemap-index.xml")
+    locs = [_text(loc) for loc in index.iterfind(f"{SITEMAP_NS}sitemap/{SITEMAP_NS}loc")]
+    if not locs:
+        raise VerifyError("dist_sitemap_empty", "sitemap-index.xml")
+    origin = _origin(locs[0])
+    urls: list[tuple[str, str]] = []
+    for loc in locs:
+        segments = _url_segments(loc, origin, "sitemap-index.xml")
+        if len(segments) != 1 or not SUB_SITEMAP_RE.fullmatch(segments[0]):
+            raise VerifyError("dist_sitemap_not_allowed", "sitemap-index.xml")
+        name = segments[0]
+        sitemap = _read_xml(dist, name)
+        if sitemap.tag != f"{SITEMAP_NS}urlset":
+            raise VerifyError("dist_sitemap_not_allowed", name)
+        urls += [(name, _text(u)) for u in sitemap.iterfind(f"{SITEMAP_NS}url/{SITEMAP_NS}loc")]
+    return origin, urls
+
+
+def _rss_urls(dist: Path) -> list[tuple[str, str]]:
+    """("rss.xml", URL) for the channel link and every item link and permalink guid."""
+    channel = _read_xml(dist, "rss.xml").find("channel")
+    if channel is None:
+        raise VerifyError("dist_xml_invalid", "rss.xml")
+    found = [_text(link) for link in channel.findall("link")]
+    for item in channel.findall("item"):
+        found += [_text(link) for link in item.findall("link")]
+        found += [_text(g) for g in item.findall("guid") if g.get("isPermaLink", "true") != "false"]
+    return [("rss.xml", url) for url in found]
+
+
+def _check_url(source: str, url: str, origin: tuple[str, str], files: set[str], public: set[str]) -> None:
+    """Map a page URL to <path>/index.html in the output and check post URLs against public."""
+    segments = _url_segments(url, origin, source)
+    if len(segments) == 2 and segments[0] == "posts" and segments[1] not in public:
+        raise VerifyError("dist_feed_post_without_evidence", source)
+    if "/".join(segments + ["index.html"]) not in files:
+        raise VerifyError("dist_url_target_missing", source)
+
+
+def verify_dist(dist: Path, public: list[str]) -> list[dict]:
+    """Errors for a deploy output folder checked against the verified public slugs."""
+    if not dist.is_dir():
+        return [_dist_error("dist_missing")]
+    try:
+        files = _dist_files(dist)
+    except VerifyError as exc:
+        return [_dist_error(exc.code, exc.path)]
+    built, errors = _built_posts(files)
+    errors += [_dist_error("dist_private_file", relative) for relative in files if _is_private(relative)]
+    for relative in REQUIRED_PAGES:
+        if relative not in files:
+            errors.append(_dist_error("missing_file", relative))
+    try:
+        origin, urls = _sitemap_urls(dist)
+        urls += _rss_urls(dist)
+    except VerifyError as exc:
+        return errors + [_dist_error(exc.code, exc.path)]
+    known = set(files)
+    for source, url in urls:
+        try:
+            _check_url(source, url, origin, known, set(public))
+        except VerifyError as exc:
+            errors.append(_dist_error(exc.code, exc.path))
+    for slug in sorted(built - set(public)):
+        errors.append(_dist_error("dist_post_without_evidence", f"posts/{slug}/index.html"))
+    for slug in sorted(set(public) - built):
+        errors.append(_dist_error("dist_post_missing", f"posts/{slug}/index.html"))
+    return errors
+
+
+def dist_root(argument: str) -> Path:
+    """Resolve --dist, refusing a symlink on the folder or on any component of a relative path."""
+    given = Path(argument)
+    parts = given.parts if not given.is_absolute() else (given.name,)
+    current = given.parent if given.is_absolute() else Path()
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise VerifyError("symlink_refused")
+    return given.resolve()
 
 
 # ---------------------------------------------------------------- self check
@@ -523,6 +739,9 @@ def check_self(path: Path) -> str | None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify publish evidence for an Astro blog repo.")
     parser.add_argument("--repo", default=None, help="Blog repo folder (default: current folder)")
+    parser.add_argument("--dist", default=None, help="Also check this built site folder before deploy")
+    parser.add_argument("--ci", action="store_true",
+                        help="Strict mode for CI and WORKERS_CI deploys: the preview switch fails in any form")
     return parser
 
 
@@ -532,13 +751,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "error", "errors": [{"code": "repo_is_symlink", "path": ""}]}, indent=2))
         return 2
     root = Path(args.repo or Path.cwd()).resolve()
-    report = {"status": "fail", "mode": "source", "verifier_version": VERIFIER_VERSION}
+    report = {"status": "fail", "mode": "dist" if args.dist else "source", "ci": args.ci,
+              "verifier_version": VERIFIER_VERSION}
     problem = check_self(Path(__file__))
     if problem:
         report["errors"] = [{"code": problem, "path": ""}]
         print(json.dumps(report, indent=2))
         return 1
-    public, errors = verify_source(root)
+    public, errors = verify_source(root, strict=args.ci)
+    if args.dist:
+        try:
+            errors += verify_dist(dist_root(args.dist), public)
+        except VerifyError as exc:
+            errors.append(_dist_error(exc.code))
     report.update(public=public, errors=errors, status="fail" if errors else "ok")
     print(json.dumps(report, indent=2))
     return 1 if errors else 0

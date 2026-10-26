@@ -497,3 +497,316 @@ def test_golden_hash_vectors(case: str) -> None:
         assert caught.value.code == vector["error"]
     else:
         assert V.hash_parts(vector["post_path"], post, assets) == vector["content_sha256"]
+
+
+# ------------------------------------------------------------------ deploy output (--dist)
+
+SITE = "https://blog.example.test"
+
+
+class Dist:
+    """A built site folder shaped like the Astro output the deploy command checks."""
+
+    def __init__(self, blog: Blog, slugs: list[str] | None = None) -> None:
+        self.root = blog.root / "dist"
+        self.slugs = list(slugs or [])
+        for relative in ("index.html", "about/index.html", "posts/index.html", "favicon.svg", "_astro/site.css"):
+            self.write(relative, "<p>page</p>")
+        for slug in self.slugs:
+            self.write(f"posts/{slug}/index.html", f"<p>{PLANTED}</p>")
+        self.feeds()
+
+    def write(self, relative: str, data: str | bytes) -> Path:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data.encode("utf-8") if isinstance(data, str) else data)
+        return path
+
+    def feeds(self, extra_urls: list[str] = (), sitemaps: list[str] | None = None,
+              extra_links: list[str] = ()) -> None:
+        pages = ["/", "/about/", "/posts/"] + [f"/posts/{slug}/" for slug in self.slugs]
+        urls = [SITE + page for page in pages] + list(extra_urls)
+        links = [f"{SITE}/posts/{slug}/" for slug in self.slugs] + list(extra_links)
+        items = "".join(f"<item><title>t</title><link>{link}</link><guid isPermaLink=\"true\">"
+                        f"{link}</guid></item>" for link in links)
+        self.write("rss.xml", f'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>t</title>'
+                              f"<link>{SITE}/</link>{items}</channel></rss>")
+        index = "".join(f"<sitemap><loc>{loc}</loc></sitemap>" for loc in (sitemaps or [f"{SITE}/sitemap-0.xml"]))
+        self.write("sitemap-index.xml", '<?xml version="1.0" encoding="UTF-8"?>'
+                   f'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{index}</sitemapindex>')
+        locs = "".join(f"<url><loc>{url}</loc></url>" for url in urls)
+        self.write("sitemap-0.xml", '<?xml version="1.0" encoding="UTF-8"?>'
+                   f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{locs}</urlset>')
+
+
+def _published(blog: Blog, slug: str = "first-post") -> Dist:
+    blog.post(slug)
+    blog.evidence(slug)
+    return Dist(blog, [slug])
+
+
+def run_dist(blog: Blog, dist: Path | str, *extra: str) -> tuple[int, dict, str]:
+    return blog.run(VERIFIER, "--dist", str(dist), *extra)
+
+
+def test_deploy_output_matching_the_verified_posts_passes(blog: Blog) -> None:
+    dist = _published(blog)
+    rc, payload, output = run_dist(blog, dist.root)
+    assert (rc, payload["status"], payload["mode"], payload["public"], payload["errors"]) == (
+        0, "ok", "dist", ["first-post"], [])
+    assert PLANTED not in output and SITE not in output
+
+
+def test_deploy_output_with_no_posts_passes(blog: Blog) -> None:
+    dist = Dist(blog)
+    rc, payload, _ = run_dist(blog, dist.root)
+    assert (rc, payload["public"], payload["errors"]) == (0, [], [])
+
+
+def _extra_post(b: Blog) -> Dist:
+    dist = _published(b)
+    dist.write("posts/ghost-post/index.html", "<p>draft leaked</p>")
+    return dist
+
+
+def _post_missing_from_output(b: Blog) -> Dist:
+    b.post("second-post")
+    b.evidence("second-post")
+    return _published(b)
+
+
+def _nested_post_page(b: Blog) -> Dist:
+    dist = _published(b)
+    dist.write("posts/first-post/part/index.html", "<p>x</p>")
+    return dist
+
+
+def _flat_post_page(b: Blog) -> Dist:
+    dist = _published(b)
+    dist.write("posts/ghost-post.html", "<p>x</p>")
+    return dist
+
+
+def _draft_built_without_evidence(b: Blog) -> Dist:
+    b.post("draft-post", post_text(draft="true"))
+    return Dist(b, ["draft-post"])
+
+
+def _rss_links_unknown_post(b: Blog) -> Dist:
+    dist = _published(b)
+    dist.feeds(extra_links=[f"{SITE}/posts/ghost-post/"])
+    return dist
+
+
+def _sitemap_lists_unknown_post(b: Blog) -> Dist:
+    dist = _published(b)
+    dist.feeds(extra_urls=[f"{SITE}/posts/ghost-post/"])
+    return dist
+
+
+def _sitemap_url_without_page(b: Blog) -> Dist:
+    dist = _published(b)
+    dist.feeds(extra_urls=[f"{SITE}/tags/astro/"])
+    return dist
+
+
+def _with_file(relative: str):
+    def setup(b: Blog) -> Dist:
+        dist = _published(b)
+        dist.write(relative, "{}")
+        return dist
+    return setup
+
+
+PRIVATE_OUTPUTS = {
+    "inbox folder": "inbox/first-post/state.md",
+    "nested inbox folder": "_astro/inbox/notes.txt",
+    "engine folder": ".blogkit/journal.json",
+    "evidence file": "assets/publish-evidence.json",
+    "draft source": "drafts/first-post.md",
+    "draft mdx source": "drafts/first-post.mdx",
+    "review record": "review.md",
+    "claims record": "first-post/claims.json",
+    "approval record": "approval.json",
+}
+
+
+def _symlinked_output_folder(b: Blog) -> Dist:
+    dist = _published(b)
+    real = dist.root / "real-posts"
+    (dist.root / "posts").rename(real)
+    (dist.root / "posts").symlink_to(real.name)
+    return dist
+
+
+def _symlinked_output_file(b: Blog) -> Dist:
+    dist = _published(b)
+    real = b.write("elsewhere/site.css", "x")
+    (dist.root / "_astro" / "site.css").unlink()
+    (dist.root / "_astro" / "site.css").symlink_to(real)
+    return dist
+
+
+def _fifo_in_output(b: Blog) -> Dist:
+    dist = _published(b)
+    os.mkfifo(dist.root / "_astro" / "pipe")
+    return dist
+
+
+def _oversize_page(b: Blog) -> Dist:
+    dist = _published(b)
+    dist.write("about/index.html", b"x" * (5 * 1024 * 1024 + 1))
+    return dist
+
+
+def _oversize_sitemap(b: Blog) -> Dist:
+    dist = _published(b)
+    dist.feeds(extra_urls=[f"{SITE}/" + "a" * (5 * 1024 * 1024)])
+    return dist
+
+
+def _too_many_files(b: Blog) -> Dist:
+    dist = _published(b)
+    folder = dist.root / "_astro" / "many"
+    folder.mkdir()
+    for n in range(20001):
+        (folder / f"{n}.js").touch()
+    return dist
+
+
+def _xml_with(declaration: str):
+    def setup(b: Blog) -> Dist:
+        dist = _published(b)
+        text = (dist.root / "rss.xml").read_text(encoding="utf-8")
+        dist.write("rss.xml", text.replace("?>", "?>" + declaration, 1))
+        return dist
+    return setup
+
+
+def _feed_url(where: str, url: str):
+    def setup(b: Blog) -> Dist:
+        dist = _published(b)
+        dist.feeds(**{where: [url]})
+        return dist
+    return setup
+
+
+def _sitemap_at(loc: str, nested: bool = False):
+    def setup(b: Blog) -> Dist:
+        dist = _published(b)
+        sitemap = (dist.root / "sitemap-0.xml").read_bytes()
+        dist.feeds(sitemaps=[f"{SITE}/sitemap-0.xml", SITE + loc])
+        target = loc.lstrip("/")
+        if nested:
+            dist.write(target, (dist.root / "sitemap-index.xml").read_bytes())
+        elif not (dist.root / target).exists():
+            dist.write(target, sitemap)
+        return dist
+    return setup
+
+
+def _unreadable_feed(b: Blog) -> Dist:
+    dist = _published(b)
+    (dist.root / "rss.xml").chmod(0)
+    return dist
+
+
+def _without(relative: str, posts: bool = True):
+    def setup(b: Blog) -> Dist:
+        dist = _published(b) if posts else Dist(b)
+        (dist.root / relative).unlink()
+        return dist
+    return setup
+
+
+REQUIRED_OUTPUTS = ("index.html", "posts/index.html", "rss.xml", "sitemap-index.xml", "sitemap-0.xml")
+
+
+DIST_FAILING = {
+    "extra post in the output": (_extra_post, "dist_post_without_evidence"),
+    "verified post missing from the output": (_post_missing_from_output, "dist_post_missing"),
+    "nested page under a post": (_nested_post_page, "dist_post_path_invalid"),
+    "flat page under posts": (_flat_post_page, "dist_post_path_invalid"),
+    "draft built into the output": (_draft_built_without_evidence, "dist_post_without_evidence"),
+    "RSS links a post without evidence": (_rss_links_unknown_post, "dist_feed_post_without_evidence"),
+    "sitemap lists a post without evidence": (_sitemap_lists_unknown_post, "dist_feed_post_without_evidence"),
+    "sitemap URL with no page": (_sitemap_url_without_page, "dist_url_target_missing"),
+    **{f"output holds {name}": (_with_file(path), "dist_private_file") for name, path in PRIVATE_OUTPUTS.items()},
+    "symlinked folder in the output": (_symlinked_output_folder, "symlink_refused"),
+    "symlinked file in the output": (_symlinked_output_file, "symlink_refused"),
+    "FIFO in the output": (_fifo_in_output, "not_a_regular_file"),
+    "oversize page": (_oversize_page, "file_too_large"),
+    "oversize sitemap": (_oversize_sitemap, "file_too_large"),
+    "too many files": (_too_many_files, "too_many_entries"),
+    "XML with a DOCTYPE": (_xml_with('<!DOCTYPE rss [<!ENTITY e "x">]>'), "dist_xml_doctype"),
+    "XML with a lowercase doctype": (_xml_with("<!doctype rss>"), "dist_xml_doctype"),
+    "sitemap URL on another origin": (_feed_url("extra_urls", "https://other.example.test/about/"), "dist_url_origin"),
+    "sitemap URL on another scheme": (_feed_url("extra_urls", "http://blog.example.test/about/"), "dist_url_origin"),
+    "RSS link on another origin": (_feed_url("extra_links", "https://other.example.test/posts/first-post/"),
+                                   "dist_url_origin"),
+    "relative RSS link": (_feed_url("extra_links", "/posts/first-post/"), "dist_url_origin"),
+    "URL with credentials": (_feed_url("extra_urls", "https://user@blog.example.test/about/"), "dist_url_origin"),
+    "URL escaping the output": (_feed_url("extra_urls", f"{SITE}/posts/../../../etc/"), "dist_url_path_invalid"),
+    "encoded URL escaping the output": (_feed_url("extra_urls", f"{SITE}/%2e%2e/%2e%2e/etc/"),
+                                        "dist_url_path_invalid"),
+    "sub-sitemap in a folder": (_sitemap_at("/posts/sitemap-1.xml"), "dist_sitemap_not_allowed"),
+    "sub-sitemap with a non-numeric name": (_sitemap_at("/sitemap-extra.xml"), "dist_sitemap_not_allowed"),
+    "sitemap index pointing at the feed": (_sitemap_at("/rss.xml"), "dist_sitemap_not_allowed"),
+    "nested sitemap index": (_sitemap_at("/sitemap-1.xml", nested=True), "dist_sitemap_not_allowed"),
+    "unreadable feed": (_unreadable_feed, "unreadable_file"),
+    **{f"{name} missing": (_without(name), "missing_file") for name in REQUIRED_OUTPUTS},
+    **{f"{name} missing with no posts": (_without(name, posts=False), "missing_file") for name in REQUIRED_OUTPUTS},
+}
+
+
+@pytest.mark.parametrize("case", sorted(DIST_FAILING))
+def test_each_deploy_output_failure_is_reported_and_exits_1(blog: Blog, case: str) -> None:
+    setup, code = DIST_FAILING[case]
+    if case == "unreadable feed" and os.geteuid() == 0:
+        pytest.skip("root reads files whatever their mode")
+    dist = setup(blog)
+    rc, payload, output = run_dist(blog, dist.root)
+    assert rc == 1 and payload["status"] == "fail"
+    assert code in _codes(payload), payload
+    assert PLANTED not in output and SITE not in output
+
+
+def test_a_symlinked_output_folder_is_refused(blog: Blog, tmp_path: Path) -> None:
+    dist = _published(blog)
+    link = tmp_path / "dist-link"
+    link.symlink_to(dist.root)
+    rc, payload, _ = run_dist(blog, link)
+    assert rc == 1 and _codes(payload) == ["symlink_refused"]
+
+
+def test_a_missing_output_folder_fails(blog: Blog) -> None:
+    rc, payload, _ = run_dist(blog, blog.root / "dist")
+    assert rc == 1 and _codes(payload) == ["dist_missing"]
+
+
+def test_a_symlink_on_a_relative_output_path_is_refused(blog: Blog, tmp_path: Path) -> None:
+    dist = _published(blog)
+    (blog.root / "site").symlink_to(blog.root)
+    result = subprocess.run([sys.executable, str(VERIFIER), "--dist", "site/dist"], cwd=blog.root,
+                            capture_output=True, text=True, env=blog.env, timeout=60)
+    assert result.returncode == 1 and _codes(json.loads(result.stdout)) == ["symlink_refused"]
+    assert run_dist(blog, dist.root)[0] == 0
+
+
+# ------------------------------------------------------------------ strict CI mode (--ci)
+
+
+@pytest.mark.parametrize("value", ["", "0", "1"])
+def test_ci_mode_refuses_the_preview_switch_in_any_form(blog: Blog, value: str) -> None:
+    dist = _published(blog)
+    blog.env.update(CI="true", WORKERS_CI="1", BLOGKIT_INCLUDE_DRAFTS=value)
+    rc, payload, _ = run_dist(blog, dist.root, "--ci")
+    assert rc == 1 and _codes(payload) == ["preview_drafts_enabled"]
+    assert payload["ci"] is True
+
+
+def test_ci_mode_passes_a_clean_deploy_output(blog: Blog) -> None:
+    dist = _published(blog)
+    blog.env.update(CI="true", WORKERS_CI="1")
+    rc, payload, _ = run_dist(blog, dist.root, "--ci")
+    assert (rc, payload["ci"], payload["errors"]) == (0, True, [])
