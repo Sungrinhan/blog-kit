@@ -46,6 +46,21 @@ can run again); after it the new copy stays and only cleanup is left. A lost
 original, a file the journal does not know or a journal naming any path
 convert would not use stops it with nothing changed.
 
+check runs publish gates 1 to 4 and records each one in the evidence:
+1 tools (Python 3.11+, node and npx on PATH, the git root, the verifier copy,
+the term list through scripts/confidential_check.py), 2 body safety (raw HTML
+and inline SVG outside code and autolinks, and SVG asset files, against the
+upstream renderer's allow-list of tags, attributes and href/src schemes;
+Markdown references by the convert rules; a file reference must be an image
+in the post's asset folder; violations are reported, never fixed), 3
+`npx --no-install astro check` by its exit code, 4 a review record for the
+current hash with no P0 (written by the M2c reviewer). The content hash is
+fixed at the start and computed again before writing; a change in between
+records nothing. Evidence for another hash starts its records afresh and
+keeps public_copy. status shows the current and evidence hash, the gate
+records for the current hash, their warning ids and digest, and what the
+evidence still lacks.
+
 Output holds fixed error codes, check ids and reasons, versions,
 repo-relative paths and line numbers only. It never prints post text, external command output
 or URLs.
@@ -70,6 +85,7 @@ import stat
 import subprocess
 import sys
 import urllib.parse
+from html.parser import HTMLParser
 from pathlib import Path
 
 INSTALL_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -77,9 +93,11 @@ DOCTOR_PATH = INSTALL_ROOT / "scripts" / "doctor.py"
 VERIFIER_PATH = INSTALL_ROOT / "adapters" / "astro" / "blogkit_verify.py"
 MANIFEST_PATH = INSTALL_ROOT / ".claude-plugin" / "plugin.json"
 RENDER_PATH = INSTALL_ROOT / "scripts" / "blog_render.py"
+CONFIDENTIAL_PATH = INSTALL_ROOT / "scripts" / "confidential_check.py"
 VERIFIER_COPY = "scripts/blogkit_verify.py"
 IDENTITY_TIMEOUT = 20.0
 COMMAND_TIMEOUT = 60.0
+ASTRO_CHECK_TIMEOUT = 600.0
 MAX_LOCATIONS = 50
 # A path-shaped token followed by :<line> in external command output.
 LOCATION_RE = re.compile(r"(?P<path>[\w./@+-]*[\w@+-]\.[A-Za-z0-9]+):(?P<line>[0-9]+)")
@@ -103,6 +121,9 @@ FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
 INLINE_DEST_RE = re.compile(r"\]\([ \t]*(<[^<>\n]*>|[^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*)(?=[ \t\n)])")
 REF_DEF_RE = re.compile(r"^ {0,3}\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(<[^<>\n]*>|\S+)", re.MULTILINE)
 FILE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
+# CommonMark autolinks (<scheme:...>, <user@host>): links, not raw HTML.
+AUTOLINK_RE = re.compile(
+    r"<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)>")
 STAGE_DIR = ".convert-stage"
 BACKUP_DIR = ".convert-backup"
 JOURNAL_NAME = "convert-journal.json"
@@ -977,6 +998,259 @@ def run(args: argparse.Namespace, blog: Path) -> dict:
     return dispatch(args, blog, verifier)
 
 
+# ---------------------------------------------------------------- publish gates and status
+
+
+def _error(code: str, path: str = "", line: int | None = None) -> dict:
+    return CliError(code, path, line).error()
+
+
+def _gate(number: int, errors: list[dict], warnings=()) -> dict:
+    return {"gate": number, "passed": not errors, "errors": errors, "warnings": sorted(set(warnings))}
+
+
+def _evidence_path(verifier, slug: str) -> str:
+    return f"{verifier.INBOX_DIR}/{slug}/{verifier.EVIDENCE_NAME}"
+
+
+def _load_evidence(blog: Path, verifier, slug: str) -> dict:
+    relative = _evidence_path(verifier, slug)
+    refuse_symlinks(blog, relative)
+    if not os.path.lexists(blog / relative):
+        raise CliError("evidence_missing", relative)
+    try:
+        evidence = verifier.read_evidence(blog, slug)
+    except verifier.VerifyError:
+        raise CliError("evidence_invalid", relative) from None
+    if (evidence["slug"], evidence["post_path"]) != (slug, verifier.post_path_for(slug)):
+        raise CliError("evidence_invalid", relative)
+    return evidence
+
+
+def _current_hash(blog: Path, verifier, slug: str) -> str:
+    try:
+        return verifier.content_hash(blog, slug)
+    except verifier.VerifyError as exc:
+        raise CliError(exc.code, exc.path) from None
+
+
+def _save_evidence(blog: Path, verifier, slug: str, evidence: dict) -> None:
+    """Replace the evidence file atomically after checking it against the contract."""
+    try:
+        verifier.validate_evidence(evidence)
+    except verifier.VerifyError:
+        raise CliError("evidence_invalid", _evidence_path(verifier, slug)) from None
+    path = blog / _evidence_path(verifier, slug)
+    temp = path.with_name(path.name + ".tmp")
+    refuse_symlinks(blog, _evidence_path(verifier, slug) + ".tmp")
+    temp.unlink(missing_ok=True)
+    _write_new(temp, (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    os.replace(temp, path)
+
+
+def gate_1(blog: Path, doctor) -> dict:
+    """Tools: Python 3.11+, node and npx on PATH, the git root, the verifier copy, the term list."""
+    errors = []
+    if sys.version_info < (3, 11):
+        errors.append(_error("python_too_old"))
+    for tool in ("node", "npx"):
+        if shutil.which(tool) is None:
+            errors.append(_error(f"{tool}_missing"))
+    for check in (lambda: require_git_repo(blog), lambda: require_verifier_copy(blog, doctor)):
+        try:
+            check()
+        except CliError as exc:
+            errors.append(_error(exc.code, exc.path))
+    try:
+        confidential = _load("blogkit_confidential", CONFIDENTIAL_PATH)
+        try:
+            confidential.load_terms()
+        except confidential.Blocked as exc:
+            errors.append(_error(f"confidential_{exc.code}"))
+    except Exception:  # noqa: BLE001 - the term list could not be checked; never print why
+        errors.append(_error("confidential_check_failed"))
+    return _gate(1, errors)
+
+
+class _HtmlCheck(HTMLParser):
+    """Report what the upstream renderer's allow-list would strip, instead of stripping it.
+
+    Tags, attributes and href/src schemes come from scripts/blog_render.py.
+    Comments are allowed; declarations, CDATA and processing instructions are
+    not (an SVG file may start with an XML declaration).
+    """
+
+    def __init__(self, render, on_file, svg_file: bool = False) -> None:
+        super().__init__(convert_charrefs=True)
+        self.render, self.on_file, self.svg_file = render, on_file, svg_file
+        self.found: list[tuple[str, int]] = []
+
+    def _report(self, code: str) -> None:
+        self.found.append((code, self.getpos()[0]))
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag not in self.render.ALLOWED_TAGS:
+            self._report("html_tag_not_allowed")
+            return
+        allowed = self.render.ALLOWED_ATTRS.get(tag, frozenset()) | self.render.GLOBAL_ATTRS
+        for raw_name, value in attrs:
+            name = raw_name.lower()
+            if name.startswith("on") or name not in allowed or value is None:
+                self._report("html_attribute_not_allowed")
+            elif name in ("href", "src"):
+                if not self.render._is_safe_url(value, media=name == "src"):
+                    self._report("html_url_not_allowed")
+                else:
+                    self.on_file(value.strip(), self.getpos()[0])
+
+    handle_startendtag = handle_starttag
+
+    def handle_decl(self, decl: str) -> None:
+        self._report("html_declaration_not_allowed")
+
+    def unknown_decl(self, data: str) -> None:
+        self._report("html_declaration_not_allowed")
+
+    def handle_pi(self, data: str) -> None:
+        if not (self.svg_file and self.getpos() == (1, 0) and data.startswith("xml ")):
+            self._report("html_declaration_not_allowed")
+
+
+def _blank(text: str, ranges) -> str:
+    """text with each range replaced by spaces, newlines kept so line numbers stay."""
+    chars = list(text)
+    for start, end in ranges:
+        for index in range(start, end):
+            if chars[index] != "\n":
+                chars[index] = " "
+    return "".join(chars)
+
+
+def gate_2(blog: Path, slug: str, verifier, render, post: bytes, assets: dict[str, bytes]) -> dict:
+    """Body safety: raw HTML and inline SVG outside code, SVG asset files, link and image URLs.
+
+    Violations are reported, never fixed. A file reference must name an
+    image of this post's asset folder. Asset name, type, size and symlink
+    rules were already enforced while reading the assets.
+    """
+    post_path = verifier.post_path_for(slug)
+    errors: list[dict] = []
+
+    def file_reference(base: str, path: str):
+        def check(url: str, line: int) -> None:
+            if url.startswith(("/", "#")) or urllib.parse.urlparse(url).scheme:
+                return
+            if posixpath.normpath(posixpath.join(posixpath.dirname(base), url)) not in assets:
+                errors.append(_error("reference_not_in_assets", path, line))
+        return check
+
+    text = post.decode("utf-8")
+    lines = text.split("\n")
+    close = lines.index("---", 1)
+    masked = "\n" * (close + 1) + "\n".join(lines[close + 1:])
+    references = _references(masked)
+    in_post = file_reference(post_path, post_path)
+    for start, _end, dest, image in references:
+        line = masked.count("\n", 0, start) + 1
+        try:
+            url = _file_reference(dest, image, render, post_path, line)
+        except CliError as exc:
+            errors.append(exc.error())
+            continue
+        if url is not None:
+            in_post(url, line)
+    hidden = _code_ranges(masked) + [m.span() for m in AUTOLINK_RE.finditer(masked)] + [r[:2] for r in references]
+    parsers = [(post_path, _blank(masked, hidden), _HtmlCheck(render, in_post))]
+    for path, data in assets.items():
+        if path.endswith(".svg"):
+            try:
+                svg = data.decode("utf-8")
+            except UnicodeDecodeError:
+                errors.append(_error("asset_not_utf8", path))
+                continue
+            parsers.append((path, svg, _HtmlCheck(render, file_reference(path, path), svg_file=True)))
+    for path, source, parser in parsers:
+        parser.feed(source)
+        parser.close()
+        errors += [_error(code, path, line) for code, line in parser.found]
+    return _gate(2, sorted(errors, key=lambda e: (e["path"] != post_path, e["path"], e.get("line", 0))))
+
+
+def gate_3(blog: Path) -> dict:
+    """astro check in the blog repo, judged by its exit code; only repo locations of its output are kept."""
+    try:
+        result = run_quiet([shutil.which("npx") or "npx", "--no-install", "astro", "check"], blog,
+                           timeout=ASTRO_CHECK_TIMEOUT)
+    except CliError as exc:
+        return _gate(3, [_error(exc.code)])
+    if result["exit_code"] == 0:
+        return _gate(3, [])
+    errors = [_error("astro_check_failed")]
+    for location in result["locations"]:
+        path, _, line = location.rpartition(":")
+        errors.append(_error("astro_check_location", path, int(line)))
+    return _gate(3, errors)
+
+
+def gate_4(evidence: dict, current: str) -> dict:
+    """A review record for the current hash with no P0 finding (written by the M2c reviewer)."""
+    reviews = [r for r in evidence["records"] if r["kind"] == "review" and r["content_hash"] == current]
+    if not reviews:
+        return _gate(4, [_error("review_missing")])
+    return _gate(4, [] if reviews[0]["p0"] == 0 else [_error("review_has_p0")])
+
+
+def check(blog: Path, slug: str, verifier, render, doctor) -> dict:
+    """Run gates 1 to 4 for the public copy and record them in its evidence.
+
+    The content hash is fixed at the start and computed again before the
+    record is written; a change in between drops the results. Evidence for
+    another hash starts its records afresh (public_copy is kept).
+    """
+    evidence = _load_evidence(blog, verifier, slug)
+    current = _current_hash(blog, verifier, slug)
+    post_path = verifier.post_path_for(slug)
+    post = _read(verifier, blog, post_path, verifier.MAX_POST_BYTES)
+    try:
+        assets = verifier.read_assets(blog, slug)
+    except verifier.VerifyError as exc:
+        raise CliError(exc.code, exc.path) from None
+    version = engine_version()
+    if evidence["content_hash"] != current:
+        evidence.update(content_hash=current, engine_version=version, records=[])
+    gates = [gate_1(blog, doctor), gate_2(blog, slug, verifier, render, post, assets), gate_3(blog),
+             gate_4(evidence, current)]
+    if _current_hash(blog, verifier, slug) != current:
+        raise CliError("content_changed_during_check", post_path)
+    numbers = {gate["gate"] for gate in gates}
+    kept = [r for r in evidence["records"] if not (r["kind"] == "gate" and r["gate"] in numbers)]
+    fresh = [{"kind": "gate", "gate": g["gate"], "passed": g["passed"], "warnings": g["warnings"],
+              "content_hash": current, "engine_version": version} for g in gates]
+    gate_records = sorted([r for r in kept if r["kind"] == "gate"] + fresh, key=lambda r: r["gate"])
+    evidence["records"] = gate_records + [r for r in kept if r["kind"] != "gate"]
+    _save_evidence(blog, verifier, slug, evidence)
+    result = {"content_hash": current, "gates": gates, "recorded": True}
+    if not all(gate["passed"] for gate in gates):
+        raise CliError("gates_failed", **result)
+    return result
+
+
+def status(blog: Path, slug: str, verifier) -> dict:
+    """Current hash, evidence hash, gate results, warnings and their digest, and what is still missing."""
+    evidence = _load_evidence(blog, verifier, slug)
+    current = _current_hash(blog, verifier, slug)
+    gates: dict[str, dict] = {}
+    if evidence["content_hash"] == current:
+        for record in evidence["records"]:
+            if record["kind"] == "gate" and record["content_hash"] == current:
+                gates[str(record["gate"])] = {"passed": record["passed"], "warnings": record["warnings"]}
+    warnings = sorted({w for gate in gates.values() for w in gate["warnings"]})
+    return {"content_hash": current, "evidence_hash": evidence["content_hash"], "gates": gates,
+            "warnings": warnings, "warnings_digest": verifier.warnings_digest(warnings),
+            "missing": verifier.evidence_gaps(evidence, current)}
+
+
 def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
     inbox = f"{verifier.INBOX_DIR}/{args.slug}"
     if args.command == "convert":
@@ -985,6 +1259,10 @@ def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
         return {**result, "recovered": recovered} if recovered else result
     if interrupted(blog, inbox):
         raise CliError("convert_interrupted", f"{inbox}/{JOURNAL_NAME}")
+    if args.command == "check":
+        return check(blog, args.slug, verifier, _load("blog_render", RENDER_PATH), _load("blogkit_doctor", DOCTOR_PATH))
+    if args.command == "status":
+        return status(blog, args.slug, verifier)
     raise CliError("not_implemented")
 
 

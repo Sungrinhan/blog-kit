@@ -29,6 +29,7 @@ ENGINE_FILES = (
     "adapters/astro/blogkit_verify.py",
     "scripts/doctor.py",
     "scripts/blog_render.py",
+    "scripts/confidential_check.py",
     ".claude-plugin/plugin.json",
 )
 PLUGIN_ID = "claude-blog@blog-kit"
@@ -81,6 +82,11 @@ class Engine:
         self.ls_remote = f"{COMMIT}\trefs/tags/{TAG}\n"
         self.env: dict[str, str] = {}
         self.git_failure: str | None = None
+        # Stub npx: exit code for `astro check`, and text appended to a file while it runs.
+        self.astro_exit = 0
+        self.astro_touch: tuple[str, str] | None = None
+        self.isolated_path = False
+        self.tools = ["node", "npx"]
 
     def _stubs(self) -> None:
         out = self.tmp / "claude-out.json"
@@ -108,13 +114,41 @@ class Engine:
         )
         for stub in (claude, git):
             stub.chmod(0o755)
+        calls = self.tmp / "npx-calls.txt"
+        touch = ""
+        if self.astro_touch is not None:
+            relative, text = self.astro_touch
+            touch = f'printf %s {json.dumps(text)} >> "{self.blog / relative}"\n'
+        for name in ("node", "npx"):
+            (self.bin / name).unlink(missing_ok=True)
+        if "node" in self.tools:
+            node = self.bin / "node"
+            node.write_text("#!/bin/sh\necho v24.0.0\n")
+            node.chmod(0o755)
+        if "npx" in self.tools:
+            npx = self.bin / "npx"
+            npx.write_text(
+                "#!/bin/sh\n"
+                f'echo "$*" >> "{calls}"\n'
+                f'echo "stdout {PLANTED} {PLANTED_URL}"\n'
+                f'echo "src/content/posts/first-post.md:2: fake diagnostic {PLANTED}" >&2\n'
+                + touch +
+                f"exit {self.astro_exit}\n"
+            )
+            npx.chmod(0o755)
+        if self.isolated_path:
+            sysbin = self.tmp / "sysbin"
+            sysbin.mkdir(exist_ok=True)
+            if not (sysbin / "cat").exists():
+                (sysbin / "cat").symlink_to(shutil.which("cat"))
 
     def run(self, *args: str, script: Path | None = None) -> tuple[int, dict, str]:
         (self.blog / ".claude" / "settings.json").write_text(json.dumps(self.shared))
         self.registry.write_text(json.dumps(self.registry_data))
         self._stubs()
         env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "BLOGKIT_INCLUDE_DRAFTS")}
-        env.update(HOME=str(self.home), PATH=f"{self.bin}{os.pathsep}{env.get('PATH', '')}", **self.env)
+        rest = str(self.tmp / "sysbin") if self.isolated_path else env.get("PATH", "")
+        env.update(HOME=str(self.home), PATH=f"{self.bin}{os.pathsep}{rest}", **self.env)
         result = subprocess.run(
             [sys.executable, str(script or self.cli), *args, "--blog-repo", str(self.blog)],
             capture_output=True, text=True, env=env, cwd=self.tmp, timeout=120,
@@ -237,7 +271,8 @@ def test_other_commands_refuse_a_copy_that_does_not_match_the_install(engine: En
 
 def test_a_matching_copy_lets_the_command_run(engine: Engine) -> None:
     rc, payload, _ = engine.run("status", "first-post")
-    assert rc == 1 and _codes(payload) == ["not_implemented"]
+    # Past every precondition: the command itself runs and finds no converted copy.
+    assert rc == 1 and _codes(payload) == ["evidence_missing"]
 
 
 # ------------------------------------------------------------------ slug lock
@@ -258,7 +293,7 @@ def _dead_pid() -> int:
 def test_a_locking_command_releases_its_lock(engine: Engine) -> None:
     lock = _lock(engine)
     rc, payload, _ = engine.run("check", "first-post")
-    assert _codes(payload) == ["not_implemented"]
+    assert _codes(payload) == ["evidence_missing"]
     assert not lock.exists()
 
 
@@ -275,7 +310,7 @@ def test_a_dead_process_lock_on_this_host_is_cleared(engine: Engine) -> None:
     lock = _lock(engine)
     lock.write_text(json.dumps({"pid": _dead_pid(), "host": socket.gethostname()}))
     rc, payload, _ = engine.run("check", "first-post")
-    assert _codes(payload) == ["not_implemented"]
+    assert _codes(payload) == ["evidence_missing"]
     assert not lock.exists()
 
 
@@ -296,7 +331,7 @@ def test_a_read_only_command_takes_no_lock(engine: Engine) -> None:
     lock = _lock(engine)
     lock.write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname()}))
     rc, payload, _ = engine.run("status", "first-post")
-    assert _codes(payload) == ["not_implemented"]
+    assert _codes(payload) == ["evidence_missing"]
 
 
 def test_a_missing_slug_folder_is_reported(engine: Engine) -> None:
@@ -1148,3 +1183,267 @@ def test_other_commands_refuse_an_interrupted_slug(engine: Engine, command: list
     rc, payload, output = engine.run(*command)
     assert rc == 1 and _codes(payload) == ["convert_interrupted"], output
     assert _unlocked(_tree(engine)) == _unlocked(before)
+
+
+# ------------------------------------------------------------------ check (gates 1 to 4) and status
+
+FAKE_TERM = "가짜금칙어"
+
+
+def _terms_file(engine: Engine, text: str = f"# fake\n{FAKE_TERM}\n") -> None:
+    path = engine.home / ".config" / "blog-kit" / "confidential.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _checkable(engine: Engine) -> None:
+    _draft(engine)
+    rc, _, output = engine.run("convert", SLUG)
+    assert rc == 0, output
+    _terms_file(engine)
+
+
+def _evidence(engine: Engine) -> dict:
+    return json.loads((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+
+
+def _write_evidence(engine: Engine, evidence: dict) -> None:
+    (engine.blog / EVIDENCE).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+
+def _review(engine: Engine, p0: int = 0) -> None:
+    """The M2c reviewer's record for the current hash, written by the test in its place.
+
+    Like every record writer, it starts the records afresh when the hash moved on.
+    """
+    evidence = _evidence(engine)
+    current = _verifier().content_hash(engine.blog, SLUG)
+    if evidence["content_hash"] != current:
+        evidence.update(content_hash=current, engine_version=VERSION, records=[])
+    evidence["records"] = [r for r in evidence["records"] if r["kind"] != "review"] + [
+        {"kind": "review", "p0": p0, "content_hash": current, "engine_version": VERSION}]
+    _write_evidence(engine, evidence)
+
+
+def _gates(payload: dict) -> dict[int, dict]:
+    return {gate["gate"]: gate for gate in payload["gates"]}
+
+
+def _gate_codes(payload: dict, number: int) -> list[str]:
+    return [error["code"] for error in _gates(payload)[number]["errors"]]
+
+
+def test_status_after_convert_lists_every_missing_record(engine: Engine) -> None:
+    _checkable(engine)
+    rc, payload, output = engine.run("status", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+    current = _verifier().content_hash(engine.blog, SLUG)
+    assert (payload["content_hash"], payload["evidence_hash"]) == (current, current)
+    assert payload["gates"] == {} and payload["warnings"] == []
+    assert payload["warnings_digest"] == _verifier().warnings_digest([])
+    assert payload["missing"] == [*(f"gate_{n}_missing" for n in range(1, 7)),
+                                  "review_missing", "learning_missing", "approval_missing"]
+    assert not (engine.blog / "inbox" / SLUG / "blogkit.lock").exists()
+
+
+def test_check_records_gates_1_to_4_and_needs_a_review(engine: Engine) -> None:
+    _checkable(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _codes(payload) == ["gates_failed"], output
+    gates = _gates(payload)
+    assert sorted(gates) == [1, 2, 3, 4]
+    assert [gates[n]["passed"] for n in (1, 2, 3, 4)] == [True, True, True, False]
+    assert _gate_codes(payload, 4) == ["review_missing"]
+    current = _verifier().content_hash(engine.blog, SLUG)
+    records = {r["gate"]: r for r in _evidence(engine)["records"] if r["kind"] == "gate"}
+    assert {n: (r["passed"], r["warnings"], r["content_hash"], r["engine_version"]) for n, r in records.items()} == {
+        1: (True, [], current, VERSION), 2: (True, [], current, VERSION),
+        3: (True, [], current, VERSION), 4: (False, [], current, VERSION)}
+    _verifier().validate_evidence(_evidence(engine))
+    _no_leak(output)
+
+
+def test_check_passes_gates_1_to_4_with_a_clean_review(engine: Engine) -> None:
+    _checkable(engine)
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+    assert [_gates(payload)[n]["passed"] for n in (1, 2, 3, 4)] == [True] * 4
+    assert (engine.tmp / "npx-calls.txt").read_text().splitlines() == ["--no-install astro check"]
+    rc, status, output = engine.run("status", SLUG)
+    assert rc == 0, output
+    assert status["gates"] == {str(n): {"passed": True, "warnings": []} for n in (1, 2, 3, 4)}
+    assert status["missing"] == ["gate_5_missing", "gate_6_missing", "learning_missing", "approval_missing"]
+
+
+def test_a_review_with_p0_fails_gate_4(engine: Engine) -> None:
+    _checkable(engine)
+    _review(engine, p0=2)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 4) == ["review_has_p0"], output
+
+
+def test_check_and_status_need_a_converted_copy(engine: Engine) -> None:
+    _draft(engine)
+    _terms_file(engine)
+    for command in ("check", "status"):
+        rc, payload, output = engine.run(command, SLUG)
+        assert rc == 1 and _codes(payload) == ["evidence_missing"], output
+
+
+@pytest.mark.parametrize("tools,codes", [
+    (["npx"], ["node_missing"]),
+    (["node"], ["npx_missing"]),
+], ids=["node", "npx"])
+def test_a_missing_tool_fails_gate_1(engine: Engine, tools: list[str], codes: list[str]) -> None:
+    _checkable(engine)
+    _review(engine)
+    engine.isolated_path = True
+    engine.tools = tools
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _codes(payload) == ["gates_failed"], output
+    assert _gate_codes(payload, 1) == codes
+    assert _gates(payload)[1]["passed"] is False
+
+
+def _symlinked_terms(e: Engine) -> None:
+    real = e.tmp / "real-terms.txt"
+    real.write_text(FAKE_TERM + "\n", encoding="utf-8")
+    path = e.home / ".config" / "blog-kit" / "confidential.txt"
+    path.unlink()
+    path.symlink_to(real)
+
+
+@pytest.mark.parametrize("change,code", [
+    (lambda e: (e.home / ".config" / "blog-kit" / "confidential.txt").unlink(), "confidential_list_missing"),
+    (lambda e: _terms_file(e, "# only a comment\n"), "confidential_list_empty"),
+    (_symlinked_terms, "confidential_list_symlink"),
+    (lambda e: _terms_file(e, "x" * (300 * 1024)), "confidential_list_too_large"),
+], ids=["missing", "empty", "symlink", "too large"])
+def test_an_unusable_term_list_fails_gate_1(engine: Engine, change, code: str) -> None:
+    _checkable(engine)
+    _review(engine)
+    change(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 1) == [code], output
+    assert FAKE_TERM not in output
+
+
+POST_LINES = EXPECTED_POST.count("\n")
+
+
+def _append_post(e: Engine, text: str) -> None:
+    with (e.blog / POST).open("a", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+GATE_2_BLOCKS = [
+    ("disallowed tag", '<iframe src="https://example.com/x"></iframe>\n', "html_tag_not_allowed"),
+    ("event handler", '<p onclick="steal()">hi</p>\n', "html_attribute_not_allowed"),
+    ("style attribute", '<p style="color: red">hi</p>\n', "html_attribute_not_allowed"),
+    ("javascript href", '<a href="javascript:alert(1)">x</a>\n', "html_url_not_allowed"),
+    ("data image", '<img src="data:image/png;base64,AAAA" alt="x">\n', "html_url_not_allowed"),
+    ("inline svg script", "<svg><script>alert(1)</script></svg>\n", "html_tag_not_allowed"),
+    ("inline svg foreign object", "<svg><foreignObject></foreignObject></svg>\n", "html_tag_not_allowed"),
+    ("markdown javascript link", "[x](javascript:alert(1))\n", "reference_scheme_not_allowed"),
+    ("markdown file outside assets", "![x](../../assets/posts/other/a.png)\n", "reference_not_in_assets"),
+    ("markdown missing asset", "![x](../../assets/posts/first-post/none.png)\n", "reference_not_in_assets"),
+    ("raw html file outside assets", '<img src="../../assets/posts/other/a.png" alt="x">\n', "reference_not_in_assets"),
+    ("scheme-less authority", "![x](//example.com/a.png)\n", "reference_unsafe"),
+]
+
+
+@pytest.mark.parametrize("text,code", [case[1:] for case in GATE_2_BLOCKS], ids=[case[0] for case in GATE_2_BLOCKS])
+def test_body_safety_violations_fail_gate_2(engine: Engine, text: str, code: str) -> None:
+    _checkable(engine)
+    _append_post(engine, "\n" + text)
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1, output
+    assert _gate_codes(payload, 2) == [code]
+    assert _gates(payload)[2]["errors"][0] == {"code": code, "path": POST, "line": POST_LINES + 2}
+    assert "example.com" not in output and "steal" not in output
+
+
+@pytest.mark.parametrize("svg,code,line", [
+    ('<svg xmlns="http://www.w3.org/2000/svg">\n<script>alert(1)</script>\n</svg>\n', "html_tag_not_allowed", 2),
+    ('<svg xmlns="http://www.w3.org/2000/svg" onload="x()">\n</svg>\n', "html_attribute_not_allowed", 1),
+    ('<svg xmlns="http://www.w3.org/2000/svg">\n<a href="javascript:x()"><text>t</text></a>\n</svg>\n',
+     "html_url_not_allowed", 2),
+    ('<!DOCTYPE svg [<!ENTITY x "y">]>\n<svg></svg>\n', "html_declaration_not_allowed", 1),
+], ids=["script", "onload", "javascript link", "doctype"])
+def test_an_unsafe_svg_asset_fails_gate_2(engine: Engine, svg: str, code: str, line: int) -> None:
+    _checkable(engine)
+    (engine.blog / ASSETS / "logo.svg").write_text(svg, encoding="utf-8")
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1, output
+    assert _gates(payload)[2]["errors"] == [{"code": code, "path": f"{ASSETS}/logo.svg", "line": line}]
+
+
+def test_html_inside_code_autolinks_and_comments_pass_gate_2(engine: Engine) -> None:
+    _checkable(engine)
+    _append_post(engine, (
+        "\n```html\n<script>alert(1)</script>\n<p onclick=\"x()\">a</p>\n```\n\n"
+        "Inline `<iframe src=\"javascript:x\">` stays text.\n\n"
+        "See <https://example.com/page> and <someone@example.com>.\n\n"
+        "<!-- a note -->\n"
+        '<figure class="wide"><img src="../../assets/posts/first-post/diagram.png" alt="d">'
+        "<figcaption>Fig</figcaption></figure>\n"
+        '<svg viewBox="0 0 10 10" width="10"><rect x="1" y="1" width="2" height="2" fill="red"/></svg>\n'
+    ))
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+
+
+def test_a_failing_astro_check_fails_gate_3_with_repo_locations_only(engine: Engine) -> None:
+    _checkable(engine)
+    _review(engine)
+    engine.astro_exit = 1
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1, output
+    assert _gates(payload)[3]["errors"] == [
+        {"code": "astro_check_failed", "path": ""}, {"code": "astro_check_location", "path": POST, "line": 2}]
+    _no_leak(output)
+    _no_leak((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("relative", [POST, f"{ASSETS}/logo.svg"], ids=["post", "asset"])
+def test_a_change_while_checking_records_nothing(engine: Engine, relative: str) -> None:
+    _checkable(engine)
+    _review(engine)
+    engine.astro_touch = (relative, "\n<!-- changed while checking -->\n")
+    before = (engine.blog / EVIDENCE).read_bytes()
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _codes(payload) == ["content_changed_during_check"], output
+    assert (engine.blog / EVIDENCE).read_bytes() == before
+    assert "gates" not in payload
+
+
+def test_a_hash_change_starts_the_records_afresh_and_keeps_public_copy(engine: Engine) -> None:
+    _checkable(engine)
+    _review(engine)
+    rc, _, output = engine.run("check", SLUG)
+    assert rc == 0, output
+    kept = _evidence(engine)["public_copy"]
+    _append_post(engine, "\nOne more line.\n")
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 4) == ["review_missing"], output
+    evidence = _evidence(engine)
+    current = _verifier().content_hash(engine.blog, SLUG)
+    assert evidence["content_hash"] == current and evidence["public_copy"] == kept
+    assert sorted(r["gate"] for r in evidence["records"]) == [1, 2, 3, 4]
+    assert all(r["content_hash"] == current for r in evidence["records"])
+
+
+def test_a_review_for_another_hash_does_not_count(engine: Engine) -> None:
+    _checkable(engine)
+    _review(engine)
+    evidence = _evidence(engine)
+    for record in evidence["records"]:
+        if record["kind"] == "review":
+            record["content_hash"] = "f" * 64
+    _write_evidence(engine, evidence)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 4) == ["review_missing"], output
