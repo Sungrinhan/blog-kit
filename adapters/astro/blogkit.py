@@ -66,7 +66,13 @@ external-links.allowed), and a transient failure is a warning. A warning id
 is <gate>:<category>:<file>:<line>[:<URL digest>]. The content hash is
 fixed at the start and computed again before writing; a change in between
 records nothing. Evidence for another hash starts its records afresh and
-keeps public_copy. status shows the current and evidence hash, the gate
+keeps public_copy. approve records the person's approval only for the full
+current hash and the digest of the latest gate warnings, and only when gates
+1 to 6, the review and the learning check pass. publish needs complete
+evidence, every asset file in HEAD with the same bytes, and nothing staged
+but the post and its evidence; it flips the draft line atomically and
+commits those two paths as "publish: <slug>". After a failed commit, running
+it again only commits; nothing is ever reset. status shows the current and evidence hash, the gate
 records for the current hash, their warning ids and digest, and what the
 evidence still lacks.
 
@@ -1415,6 +1421,137 @@ def status(blog: Path, slug: str, verifier) -> dict:
             "missing": verifier.evidence_gaps(evidence, current)}
 
 
+def _gate_warnings(evidence: dict) -> list[str]:
+    return sorted({w for r in evidence["records"] if r["kind"] == "gate" for w in r["warnings"]})
+
+
+def approve(blog: Path, slug: str, verifier, content_hash: str, warnings: str) -> dict:
+    """Record the person's approval of exactly this hash and warning set.
+
+    Every gate (1 to 6), the review and the learning check must already pass
+    for the current hash; only the approval itself may be missing or stale.
+    """
+    evidence = _load_evidence(blog, verifier, slug)
+    current = _current_hash(blog, verifier, slug)
+    if content_hash != current:
+        raise CliError("hash_mismatch")
+    gaps = [gap for gap in verifier.evidence_gaps(evidence, current)
+            if gap not in ("approval_missing", "approval_warnings_mismatch")]
+    if gaps:
+        raise CliError("evidence_incomplete", missing=gaps)
+    digest = verifier.warnings_digest(_gate_warnings(evidence))
+    if warnings != digest:
+        raise CliError("warnings_mismatch")
+    evidence["records"] = [r for r in evidence["records"] if r["kind"] != "approval"] + [
+        {"kind": "approval", "warnings_digest": digest, "content_hash": current, "engine_version": engine_version()}]
+    if _current_hash(blog, verifier, slug) != current:
+        raise CliError("content_changed_during_check", verifier.post_path_for(slug))
+    _save_evidence(blog, verifier, slug, evidence)
+    return {"content_hash": current, "warnings_digest": digest, "approved": True}
+
+
+def _git_output(blog: Path, *args: str) -> tuple[int, str]:
+    """git in the blog repo for the engine's own decisions; its output is parsed here, never printed."""
+    try:
+        result = subprocess.run([shutil.which("git") or "git", *args], cwd=blog, capture_output=True, text=True,
+                                errors="replace", timeout=COMMAND_TIMEOUT, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired):
+        raise CliError("git_failed") from None
+    return result.returncode, result.stdout
+
+
+def _assets_in_head(blog: Path, verifier, slug: str) -> dict[str, str]:
+    """Blob id of each file HEAD holds in the post's asset folder (empty without HEAD)."""
+    code, listing = _git_output(blog, "ls-tree", "-r", "-z", "HEAD", "--", f"{verifier.ASSETS_DIR}/{slug}")
+    if code != 0:
+        return {}
+    entries = {}
+    for entry in filter(None, listing.split("\0")):
+        meta, _, path = entry.partition("\t")
+        entries[path] = meta.split()[-1]
+    return entries
+
+
+def _assets_on_disk(blog: Path, verifier, slug: str) -> dict[str, str]:
+    """Blob id git would store for each file in the post's asset folder (git hash-object, filters applied).
+
+    Compared with HEAD it catches an added, changed or deleted file, and a
+    change that skip-worktree or assume-unchanged hides from git status.
+    """
+    try:
+        paths = sorted(verifier.read_assets(blog, slug))
+    except verifier.VerifyError as exc:
+        raise CliError(exc.code, exc.path) from None
+    if not paths:
+        return {}
+    code, ids = _git_output(blog, "hash-object", "--", *paths)
+    if code != 0 or len(ids.split()) != len(paths):
+        raise CliError("git_failed")
+    return dict(zip(paths, ids.split()))
+
+
+def _flip_draft(blog: Path, verifier, post_path: str) -> bool:
+    """Turn the single frontmatter "draft: true" line into "draft: false" atomically; False if already false."""
+    data = _read(verifier, blog, post_path, verifier.MAX_POST_BYTES)
+    start, stop = verifier._frontmatter_bounds(data)
+    lines = data[start:stop].split(b"\n")
+    hits = [i for i, line in enumerate(lines) if verifier.DRAFT_LINE_RE.fullmatch(line)]
+    if len(hits) != 1:
+        raise CliError("draft_line_count", post_path)
+    if lines[hits[0]] == b"draft: false":
+        return False
+    lines[hits[0]] = b"draft: false"
+    path = blog / post_path
+    temp = path.with_name(f".{path.name}.publish-tmp")
+    refuse_symlinks(blog, f"{verifier.POSTS_DIR}/{temp.name}")
+    temp.unlink(missing_ok=True)
+    _write_new(temp, data[:start] + b"\n".join(lines) + data[stop:])
+    os.replace(temp, path)
+    return True
+
+
+def publish(blog: Path, slug: str, verifier) -> dict:
+    """Flip the draft line and commit the post and its evidence, and nothing else, as "publish: <slug>".
+
+    Refused unless the evidence is complete for the current hash, every file
+    of the post's asset folder is in HEAD with the same bytes (and HEAD has
+    no other file there), and nothing but those two paths is staged. A run after a failed
+    commit finds draft: false and complete evidence and only commits; it
+    never resets anything.
+    """
+    post_path = verifier.post_path_for(slug)
+    evidence_path = _evidence_path(verifier, slug)
+    assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
+    current = _current_hash(blog, verifier, slug)
+    evidence = _load_evidence(blog, verifier, slug)
+    gaps = verifier.evidence_gaps(evidence, current)
+    if gaps:
+        raise CliError("evidence_incomplete", missing=gaps)
+    if _assets_in_head(blog, verifier, slug) != _assets_on_disk(blog, verifier, slug):
+        raise CliError("assets_not_committed", assets_dir)
+    code, staged = _git_output(blog, "diff", "--cached", "--name-only", "-z")
+    if code != 0:
+        raise CliError("git_failed")
+    if set(filter(None, staged.split("\0"))) - {post_path, evidence_path}:
+        raise CliError("other_changes_staged")
+    if _current_hash(blog, verifier, slug) != current:
+        raise CliError("content_changed_during_check", post_path)
+    resumed = not _flip_draft(blog, verifier, post_path)
+    code, pending = _git_output(blog, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--",
+                                post_path, evidence_path)
+    if code != 0:
+        raise CliError("git_failed")
+    if resumed and not pending:
+        code, head = _git_output(blog, "rev-parse", "HEAD")
+        return {"published": True, "commit": head.strip(), "resumed": True, "already_published": True}
+    for args in (("add", "--", post_path, evidence_path),
+                 ("commit", "-q", "-m", f"publish: {slug}", "--", post_path, evidence_path)):
+        if _git_output(blog, *args)[0] != 0:
+            raise CliError("commit_failed", post_path)
+    code, head = _git_output(blog, "rev-parse", "HEAD")
+    return {"published": True, "commit": head.strip(), "resumed": resumed, "already_published": False}
+
+
 def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
     inbox = f"{verifier.INBOX_DIR}/{args.slug}"
     if args.command == "convert":
@@ -1427,6 +1564,10 @@ def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
         return check(blog, args.slug, verifier, _load("blog_render", RENDER_PATH), _load("blogkit_doctor", DOCTOR_PATH))
     if args.command == "status":
         return status(blog, args.slug, verifier)
+    if args.command == "approve":
+        return approve(blog, args.slug, verifier, args.hash, args.warnings)
+    if args.command == "publish":
+        return publish(blog, args.slug, verifier)
     raise CliError("not_implemented")
 
 

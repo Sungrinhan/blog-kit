@@ -1702,3 +1702,300 @@ def test_the_preview_build_replaces_an_old_preview_and_leaves_dist_alone(engine:
     assert gate["passed"] is True
     assert not (engine.blog / PREVIEW_DIR / "posts" / "stale").exists()
     assert (engine.blog / "dist" / "index.html").read_text() == "deployed"
+
+
+# ------------------------------------------------------------------ approve and publish
+
+
+def _learning(engine: Engine, passed: bool = True) -> None:
+    """The M2c learning check's record for the current hash, written by the test in its place."""
+    evidence = _evidence(engine)
+    current = _verifier().content_hash(engine.blog, SLUG)
+    assert evidence["content_hash"] == current
+    evidence["records"] = [r for r in evidence["records"] if r["kind"] != "learning"] + [
+        {"kind": "learning", "passed": passed, "content_hash": current, "engine_version": VERSION}]
+    _write_evidence(engine, evidence)
+
+
+def _checked(engine: Engine) -> dict:
+    """Converted, reviewed, checked through all six gates and learning-checked; returns status."""
+    _checkable(engine)
+    _review(engine)
+    rc, _, output = engine.run("check", SLUG)
+    assert rc == 0, output
+    _learning(engine)
+    rc, status, output = engine.run("status", SLUG)
+    assert rc == 0, output
+    return status
+
+
+def _approve(engine: Engine, content_hash: str, digest: str) -> tuple[int, dict, str]:
+    return engine.run("approve", SLUG, "--hash", content_hash, "--warnings", digest)
+
+
+def test_approve_records_the_approval_for_hash_and_warnings(engine: Engine) -> None:
+    status = _checked(engine)
+    rc, payload, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert (rc, payload["errors"]) == (0, []), output
+    approvals = [r for r in _evidence(engine)["records"] if r["kind"] == "approval"]
+    assert approvals == [{"kind": "approval", "warnings_digest": status["warnings_digest"],
+                          "content_hash": status["content_hash"], "engine_version": VERSION}]
+    rc, status, output = engine.run("status", SLUG)
+    assert status["missing"] == [], output
+
+
+@pytest.mark.parametrize("change,code", [
+    (lambda s: ("0" * 64, s["warnings_digest"]), "hash_mismatch"),
+    (lambda s: (s["content_hash"][:16], s["warnings_digest"]), "hash_mismatch"),
+    (lambda s: (s["content_hash"], _verifier().warnings_digest([])), "warnings_mismatch"),
+], ids=["other hash", "short hash", "other warnings"])
+def test_approve_refuses_arguments_that_do_not_match(engine: Engine, change, code: str) -> None:
+    status = _checked(engine)
+    before = _evidence(engine)
+    rc, payload, output = _approve(engine, *change(status))
+    assert rc == 1 and _codes(payload) == [code], output
+    assert _evidence(engine) == before
+
+
+def _no_learning(e: Engine) -> None:
+    evidence = _evidence(e)
+    evidence["records"] = [r for r in evidence["records"] if r["kind"] != "learning"]
+    _write_evidence(e, evidence)
+
+
+def _failed_gate(e: Engine) -> None:
+    evidence = _evidence(e)
+    for record in evidence["records"]:
+        if record.get("gate") == 3:
+            record["passed"] = False
+    _write_evidence(e, evidence)
+
+
+@pytest.mark.parametrize("change,gap", [
+    (_no_learning, "learning_missing"),
+    (lambda e: _learning(e, passed=False), "learning_not_passed"),
+    (_failed_gate, "gate_3_not_passed"),
+], ids=["no learning", "learning failed", "gate failed"])
+def test_approve_needs_every_gate_and_the_learning_check(engine: Engine, change, gap: str) -> None:
+    status = _checked(engine)
+    change(engine)
+    before = _evidence(engine)
+    rc, payload, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 1 and _codes(payload) == ["evidence_incomplete"] and gap in payload["missing"], output
+    assert _evidence(engine) == before
+
+
+def _git(engine: Engine, *args: str) -> str:
+    result = subprocess.run([REAL_GIT, "-C", str(engine.blog), *args], capture_output=True, text=True, check=True)
+    return result.stdout
+
+
+def _commit_assets(engine: Engine) -> None:
+    _git(engine, "config", "user.email", "tester@example.invalid")
+    _git(engine, "config", "user.name", "Tester")
+    _git(engine, "add", "--", ASSETS)
+    _git(engine, "commit", "-q", "-m", "assets")
+
+
+def _approved(engine: Engine) -> dict:
+    status = _checked(engine)
+    rc, _, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 0, output
+    _commit_assets(engine)
+    return status
+
+
+def _verify_source(engine: Engine) -> dict:
+    """The blog repo's verifier copy in source mode, as the site's prebuild runs it."""
+    env = {k: v for k, v in os.environ.items() if k != "BLOGKIT_INCLUDE_DRAFTS"}
+    result = subprocess.run([sys.executable, str(engine.copy), "--repo", str(engine.blog)],
+                            capture_output=True, text=True, env=env)
+    return json.loads(result.stdout)
+
+
+def test_the_whole_path_publishes_the_post_and_evidence_only(engine: Engine) -> None:
+    outputs = []
+    _checkable(engine)
+    _review(engine)
+    for command in (["check", SLUG], ["status", SLUG]):
+        rc, payload, output = engine.run(*command)
+        outputs.append(output)
+        assert rc == 0, output
+    _learning(engine)
+    rc, status, output = engine.run("status", SLUG)
+    rc, payload, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    outputs.append(output)
+    assert rc == 0, output
+    _commit_assets(engine)
+    rc, payload, output = engine.run("publish", SLUG)
+    outputs.append(output)
+    assert (rc, payload["errors"]) == (0, []), output
+    assert _git(engine, "log", "-1", "--format=%s") == f"publish: {SLUG}\n"
+    assert sorted(_git(engine, "show", "--name-only", "--format=", "HEAD").split()) == sorted([EVIDENCE, POST])
+    assert (engine.blog / POST).read_text(encoding="utf-8") == EXPECTED_POST.replace("draft: true", "draft: false")
+    assert payload["commit"] == _git(engine, "rev-parse", "HEAD").strip()
+    report = _verify_source(engine)
+    assert (report["status"], report["public"], report["errors"]) == ("ok", [SLUG], [])
+    for output in outputs:
+        _no_leak(output)
+        assert "example.com" not in output and FAKE_TERM not in output
+    _no_leak((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+
+
+def _stage_other(e: Engine) -> None:
+    (e.blog / "notes.md").write_text("fake notes\n")
+    _git(e, "add", "--", "notes.md")
+
+
+def _no_approval(e: Engine) -> None:
+    evidence = _evidence(e)
+    evidence["records"] = [r for r in evidence["records"] if r["kind"] != "approval"]
+    _write_evidence(e, evidence)
+
+
+def _assets_never_committed(e: Engine) -> None:
+    _git(e, "rm", "-q", "-r", "--cached", "--", ASSETS)
+    _git(e, "commit", "-q", "-m", "drop assets from git")
+
+
+@pytest.mark.parametrize("change,code", [
+    (_stage_other, "other_changes_staged"),
+    (_assets_never_committed, "assets_not_committed"),
+    (_no_approval, "evidence_incomplete"),
+    (lambda e: _append_post(e, "\none more byte\n"), "evidence_incomplete"),
+    (lambda e: (e.blog / POST).write_text(EXPECTED_POST.replace("가짜 설명입니다", "가짜 설명입니다!"),
+                                          encoding="utf-8"), "evidence_incomplete"),
+    (lambda e: (e.blog / ASSETS / "diagram.png").write_bytes(PNG + b"!"), "evidence_incomplete"),
+], ids=["other staged", "assets not committed", "no approval", "body byte", "frontmatter byte", "asset byte"])
+def test_publish_refusals_change_nothing(engine: Engine, change, code: str) -> None:
+    _approved(engine)
+    change(engine)
+    head = _git(engine, "rev-parse", "HEAD")
+    post = (engine.blog / POST).read_bytes()
+    rc, payload, output = engine.run("publish", SLUG)
+    assert rc == 1 and _codes(payload) == [code], output
+    assert _git(engine, "rev-parse", "HEAD") == head
+    assert (engine.blog / POST).read_bytes() == post
+
+
+def test_a_new_asset_not_in_git_blocks_publish(engine: Engine) -> None:
+    status = _checked(engine)
+    _commit_assets(engine)
+    (engine.blog / ASSETS / "late.svg").write_text("<svg></svg>\n")
+    # Gates and approval for the hash that includes the new asset, but the asset is not committed.
+    _review(engine)
+    rc, _, output = engine.run("check", SLUG)
+    assert rc == 0, output
+    _learning(engine)
+    rc, status, _ = engine.run("status", SLUG)
+    rc, _, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 0, output
+    rc, payload, output = engine.run("publish", SLUG)
+    assert rc == 1 and _codes(payload) == ["assets_not_committed"], output
+
+
+@pytest.mark.parametrize("change", [
+    lambda e: _append_post(e, "\nchanged after publishing\n"),
+    lambda e: (e.blog / ASSETS / "diagram.png").write_bytes(PNG + b"!"),
+], ids=["body", "asset"])
+def test_a_change_after_publishing_fails_the_verifier(engine: Engine, change) -> None:
+    _approved(engine)
+    rc, _, output = engine.run("publish", SLUG)
+    assert rc == 0, output
+    assert _verify_source(engine)["status"] == "ok"
+    change(engine)
+    report = _verify_source(engine)
+    assert report["status"] == "fail" and report["errors"]
+
+
+HOOK = """#!/bin/sh
+if [ -f "{flag}" ]; then echo "hook refused {planted}" >&2; exit 1; fi
+exit 0
+"""
+
+
+def test_a_failed_commit_is_finished_by_running_publish_again(engine: Engine) -> None:
+    _approved(engine)
+    flag = engine.tmp / "refuse-commit"
+    flag.write_text("x")
+    hook = engine.blog / ".git" / "hooks" / "pre-commit"
+    hook.write_text(HOOK.format(flag=flag, planted=PLANTED))
+    hook.chmod(0o755)
+    (engine.blog / "README.md").write_text("tracked\n")
+    _git(engine, "add", "--", "README.md")
+    _git(engine, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "readme")
+    (engine.blog / "README.md").write_text("tracked, edited by hand\n")
+    head = _git(engine, "rev-parse", "HEAD")
+    rc, payload, output = engine.run("publish", SLUG)
+    assert rc == 1 and _codes(payload) == ["commit_failed"], output
+    _no_leak(output)
+    assert _git(engine, "rev-parse", "HEAD") == head
+    assert "draft: false\n" in (engine.blog / POST).read_text(encoding="utf-8")
+    flag.unlink()
+    rc, payload, output = engine.run("publish", SLUG)
+    assert (rc, payload["errors"], payload["resumed"]) == (0, [], True), output
+    assert sorted(_git(engine, "show", "--name-only", "--format=", "HEAD").split()) == sorted([EVIDENCE, POST])
+    assert (engine.blog / "README.md").read_text() == "tracked, edited by hand\n"
+    assert _git(engine, "status", "--porcelain", "--", "README.md") == " M README.md\n"
+    rc, payload, output = engine.run("publish", SLUG)
+    assert (rc, payload["already_published"]) == (0, True), output
+
+
+ALL_COMMANDS = [["convert", SLUG], ["check", SLUG], ["status", SLUG], ["approve", SLUG, "--hash", "0" * 64,
+                "--warnings", "0" * 64], ["publish", SLUG], ["sync-verifier"]]
+
+
+def test_no_command_prints_planted_secrets_on_the_normal_or_failing_path(engine: Engine) -> None:
+    _checkable(engine)
+    (engine.blog / ASSETS / "logo.svg").write_text(f"<svg><text>{FAKE_TERM}</text></svg>\n", encoding="utf-8")
+    engine.astro_exit = 1
+    engine.build_exit = 1
+    engine.net["answers"] = {EXTERNAL_LINK: "timeout"}
+    for failing in (None, f"fatal: {PLANTED} at {PLANTED_URL}\n"):
+        engine.git_failure = failing
+        for command in ALL_COMMANDS:
+            rc, payload, output = engine.run(*command)
+            assert payload, output
+            _no_leak(output)
+            assert "example.com" not in output and FAKE_TERM not in output, command
+    text = (engine.blog / EVIDENCE).read_text(encoding="utf-8")
+    _no_leak(text)
+    assert "example.com" not in text and FAKE_TERM not in text
+
+
+def _reapprove(engine: Engine) -> None:
+    """Gates, learning and approval again for whatever the copy holds now."""
+    _review(engine)
+    rc, _, output = engine.run("check", SLUG)
+    assert rc == 0, output
+    _learning(engine)
+    rc, status, _ = engine.run("status", SLUG)
+    rc, _, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 0, output
+
+
+def _hidden_change(e: Engine) -> None:
+    _git(e, "update-index", "--skip-worktree", "--", f"{ASSETS}/diagram.png")
+    (e.blog / ASSETS / "diagram.png").write_bytes(PNG + b" hidden from git status")
+
+
+def _deleted_asset(e: Engine) -> None:
+    """Drop the logo and its reference, so the gates pass for a copy whose asset is gone from disk only."""
+    (e.blog / ASSETS / "logo.svg").unlink()
+    post = (e.blog / POST).read_text(encoding="utf-8")
+    (e.blog / POST).write_text(post.replace("[![logo](../../assets/posts/first-post/logo.svg)](/about/)", "logo"),
+                               encoding="utf-8")
+
+
+@pytest.mark.parametrize("change", [
+    lambda e: (e.blog / ASSETS / "diagram.png").write_bytes(PNG + b" edited after commit"),
+    _deleted_asset,
+    _hidden_change,
+], ids=["modified", "deleted", "skip-worktree"])
+def test_assets_must_match_head_byte_for_byte(engine: Engine, change) -> None:
+    _checked(engine)
+    _commit_assets(engine)
+    change(engine)
+    _reapprove(engine)
+    rc, payload, output = engine.run("publish", SLUG)
+    assert rc == 1 and _codes(payload) == ["assets_not_committed"], output
