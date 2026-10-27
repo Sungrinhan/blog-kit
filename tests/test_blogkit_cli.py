@@ -141,6 +141,7 @@ class Engine:
         self.build_exit = 0
         self.preview = dict(DEFAULT_PREVIEW)
         self.net = {"hosts": {}, "answers": {}}
+        self.timeout = 120.0
 
     def _stubs(self) -> None:
         out = self.tmp / "claude-out.json"
@@ -231,7 +232,7 @@ class Engine:
         env.update(HOME=str(self.home), PATH=f"{self.bin}{os.pathsep}{rest}", **self.env)
         result = subprocess.run(
             [sys.executable, str(script or self.tmp / "run-netfake.py"), *args, "--blog-repo", str(self.blog)],
-            capture_output=True, text=True, env=env, cwd=self.tmp, timeout=120,
+            capture_output=True, text=True, env=env, cwd=self.tmp, timeout=self.timeout,
         )
         try:
             payload = json.loads(result.stdout)
