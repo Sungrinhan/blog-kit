@@ -21,7 +21,7 @@ of a git work tree. Commands that change the evidence or the public copy
 records the process id and host; only a lock left by a dead process on this
 host is cleared.
 
-convert creates the first public copy from the upstream-format draft. The
+convert creates or replaces the public copy from the upstream-format draft. The
 draft frontmatter is a restricted subset (title, description of at most 160
 characters, date, optional lastUpdated and tags, and dropped upstream keys);
 any other key fails. References are sorted in this order: a backslash or a
@@ -29,10 +29,14 @@ scheme-less authority is refused, a scheme or authority makes an external URL
 that the upstream renderer's link-safety rule must allow, "/" and "#" stay as
 site URLs and anchors, and the rest are file references that must name an
 image inside the draft folder; those are copied to the post's asset folder
-and rewritten. A remaining draft marker fails. An existing post, asset folder
-or evidence for the slug is refused. The post, assets and new evidence go in
-as one unit: staged under inbox/<slug>/, a journal, a re-check that the
-targets are still absent, one rename per target, an applied mark, then
+and rewritten. A remaining draft marker fails. A published post is always
+refused. An existing post is replaced only when it is a draft whose post and
+assets match the evidence's public_copy record exactly; a file without a
+record, a changed copy and an asset the record does not own are kept and
+refused. A new content hash starts the records afresh; the same hash keeps
+them. The changed post, assets and evidence go in as one unit: staged under
+inbox/<slug>/, a journal, a re-check that the targets are as they were at
+the start, a backup and one rename per target, an applied mark, then
 cleanup. A handled error while moving rolls the unit back on the spot.
 
 Output holds fixed error codes, check ids and reasons, versions,
@@ -95,6 +99,7 @@ FILE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
 STAGE_DIR = ".convert-stage"
 BACKUP_DIR = ".convert-backup"
 JOURNAL_NAME = "convert-journal.json"
+MAX_FOLDER_ENTRIES = 1000
 
 
 class CliError(Exception):
@@ -532,11 +537,76 @@ def _asset_source(blog: Path, verifier, draft_folder: str, url: str, path: str, 
     return name, source
 
 
-def _require_absent(blog: Path, paths: list[str]) -> None:
-    for relative in paths:
+def _target_state(blog: Path, paths: list[str], folder: str, cap: int) -> dict[str, str | None]:
+    """Digest of each target path and of each file in folder (None = absent, "unknown" = not a file).
+
+    folder itself maps to "folder" when it is a real folder.
+    """
+    state: dict[str, str | None] = {}
+    for relative in (*paths, folder):
         refuse_symlinks(blog, relative)
-        if os.path.lexists(blog / relative):
+    for relative in paths:
+        state[relative] = _file_digest(blog / relative, cap)
+    location = blog / folder
+    if not os.path.lexists(location):
+        state[folder] = None
+    elif not location.is_dir():
+        state[folder] = "unknown"
+    else:
+        state[folder] = "folder"
+        with os.scandir(location) as entries:
+            for count, entry in enumerate(entries, 1):
+                if count > MAX_FOLDER_ENTRIES:
+                    raise CliError("too_many_files", folder)
+                state[f"{folder}/{entry.name}"] = _file_digest(Path(entry.path), cap)
+    return state
+
+
+def _owned_copy(blog: Path, verifier, slug: str, state: dict[str, str | None], absent: list[str]) -> dict | None:
+    """The evidence of a public copy that convert may replace, None when there is none yet.
+
+    Refuses a published post, a file or folder without a record, a copy that
+    differs from its public_copy record and an asset the record does not own.
+    """
+    post_path = verifier.post_path_for(slug)
+    assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
+    evidence_path = f"{verifier.INBOX_DIR}/{slug}/{verifier.EVIDENCE_NAME}"
+    for relative in absent:
+        if state[relative] is not None:
             raise CliError("target_exists", relative)
+    if state[post_path] is None:
+        for relative, digest in state.items():
+            if digest is not None:
+                raise CliError("target_exists", relative)
+        return None
+    post = _read(verifier, blog, post_path, verifier.MAX_POST_BYTES)
+    try:
+        published = verifier.is_public(post, post_path)
+    except verifier.VerifyError:
+        published = False
+    if published:
+        raise CliError("target_published", post_path)
+    if state[evidence_path] is None:
+        raise CliError("target_exists", post_path)
+    try:
+        evidence = verifier.read_evidence(blog, slug)
+    except verifier.VerifyError:
+        raise CliError("evidence_invalid", evidence_path) from None
+    record = evidence["public_copy"]
+    if (evidence["slug"], evidence["post_path"], record["post_path"]) != (slug, post_path, post_path):
+        raise CliError("evidence_invalid", evidence_path)
+    if state[post_path] != record["post_digest"]:
+        raise CliError("target_modified", post_path)
+    owned = {asset["path"]: asset["digest"] for asset in record["assets"]}
+    if state[assets_dir] == "unknown":
+        raise CliError("asset_unowned", assets_dir)
+    for relative in state:
+        if relative.startswith(f"{assets_dir}/") and relative not in owned:
+            raise CliError("asset_unowned", relative)
+    for relative, digest in owned.items():
+        if state.get(relative) != digest:
+            raise CliError("target_modified", relative)
+    return evidence
 
 
 def _missing_dirs(blog: Path, paths) -> list[str]:
@@ -597,16 +667,22 @@ def _roll_back(blog: Path, journal: dict, cap: int) -> bool:
     """
     targets = journal["targets"]
     digests = [_file_digest(blog / target["path"], cap) for target in targets]
-    if any(digest not in (None, target["new_digest"]) for digest, target in zip(digests, targets)):
-        return False
+    for digest, target in zip(digests, targets):
+        original, new = target["original_digest"], target["new_digest"]
+        if digest not in (None, original, new):
+            return False
+        if target["existed"] and digest != original and _file_digest(blog / target["backup"], cap) != original:
+            return False
     try:
         for digest, target in zip(reversed(digests), reversed(targets)):
-            if digest is None:
-                continue
-            if os.path.lexists(blog / target["staged"]):
-                (blog / target["path"]).unlink()
-            else:
-                os.replace(blog / target["path"], blog / target["staged"])
+            here = blog / target["path"]
+            if digest is not None and digest == target["new_digest"] != target["original_digest"]:
+                if os.path.lexists(blog / target["staged"]):
+                    here.unlink()
+                else:
+                    os.replace(here, blog / target["staged"])
+            if target["existed"] and not os.path.lexists(here):
+                os.replace(blog / target["backup"], here)
         for folder in reversed(journal["created_dirs"]):
             if os.path.lexists(blog / folder):
                 os.rmdir(blog / folder)
@@ -615,15 +691,17 @@ def _roll_back(blog: Path, journal: dict, cap: int) -> bool:
     return True
 
 
-def apply_unit(blog: Path, inbox: str, files: dict[str, bytes], guarded: list[str], cap: int) -> None:
-    """Put new files in place as one unit.
+def apply_unit(blog: Path, inbox: str, changes: dict[str, bytes | None], before: dict[str, str | None],
+               recheck, cap: int) -> None:
+    """Put new files in place, and remove old ones (None), as one unit.
 
-    Stage every file under inbox/<slug>/, write the journal (per target: path,
-    whether it existed, original and new digest, staged and backup location,
-    plus the folders to create and an applied flag), check that the guarded
-    targets are still absent, move each staged file into place, mark the
-    journal applied, then remove the stage, backups and journal. A handled
-    error while moving rolls the unit back on the spot.
+    Stage every new file under inbox/<slug>/, write the journal (per target:
+    path, whether it existed, original and new digest, staged and backup
+    location, plus the folders to create and an applied flag), call recheck
+    (it raises when a target moved on since the start), move each existing
+    target to its backup and each staged file into place, mark the journal
+    applied, then remove the stage, backups and journal. A handled error
+    while moving rolls the unit back on the spot.
     """
     stage = f"{inbox}/{STAGE_DIR}"
     journal_path = blog / inbox / JOURNAL_NAME
@@ -631,22 +709,29 @@ def apply_unit(blog: Path, inbox: str, files: dict[str, bytes], guarded: list[st
     refuse_symlinks(blog, f"{inbox}/{JOURNAL_NAME}")
     if os.path.lexists(blog / stage) or os.path.lexists(journal_path):
         raise CliError("convert_leftover", inbox)
+    refuse_symlinks(blog, f"{inbox}/{BACKUP_DIR}")
+    if os.path.lexists(blog / inbox / BACKUP_DIR):
+        raise CliError("convert_leftover", inbox)
     targets = [
-        {"path": path, "existed": False, "original_digest": None, "new_digest": _sha256(data),
+        {"path": path, "existed": before.get(path) is not None, "original_digest": before.get(path),
+         "new_digest": None if data is None else _sha256(data),
          "staged": f"{stage}/{index}", "backup": f"{inbox}/{BACKUP_DIR}/{index}"}
-        for index, (path, data) in enumerate(files.items())
+        for index, (path, data) in enumerate(changes.items())
     ]
-    journal = {"journal": 1, "applied": False, "created_dirs": _missing_dirs(blog, files), "targets": targets}
+    created = _missing_dirs(blog, [path for path, data in changes.items() if data is not None])
+    journal = {"journal": 1, "applied": False, "created_dirs": created, "targets": targets}
     try:
         os.mkdir(blog / stage)
-        for target, data in zip(targets, files.values()):
-            _write_new(blog / target["staged"], data)
+        os.mkdir(blog / inbox / BACKUP_DIR)
+        for target, data in zip(targets, changes.values()):
+            if data is not None:
+                _write_new(blog / target["staged"], data)
         _write_journal(journal_path, journal)
     except OSError:
         _discard(blog, inbox)
         raise CliError("stage_failed", stage) from None
     try:
-        _require_absent(blog, guarded)
+        recheck()
     except CliError as exc:
         _discard(blog, inbox)
         raise CliError("target_changed", exc.path) from None
@@ -654,7 +739,10 @@ def apply_unit(blog: Path, inbox: str, files: dict[str, bytes], guarded: list[st
         for folder in journal["created_dirs"]:
             os.mkdir(blog / folder)
         for target in targets:
-            os.replace(blog / target["staged"], blog / target["path"])
+            if target["existed"]:
+                os.replace(blog / target["path"], blog / target["backup"])
+            if target["new_digest"] is not None:
+                os.replace(blog / target["staged"], blog / target["path"])
     except OSError:
         if not _roll_back(blog, journal, cap):
             raise CliError("apply_failed", f"{inbox}/{JOURNAL_NAME}", rolled_back=False) from None
@@ -669,16 +757,20 @@ def apply_unit(blog: Path, inbox: str, files: dict[str, bytes], guarded: list[st
 
 
 def convert(blog: Path, slug: str, verifier, render) -> dict:
-    """Create the first public copy (draft: true), its assets and new evidence."""
+    """Create or replace the public copy (draft: true), its assets and evidence."""
     inbox = f"{verifier.INBOX_DIR}/{slug}"
     draft_folder = f"{inbox}/draft"
     draft_path = f"{draft_folder}/{slug}.md"
     post_path = verifier.post_path_for(slug)
     assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
     evidence_path = f"{inbox}/{verifier.EVIDENCE_NAME}"
-    guarded = [post_path, f"{verifier.POSTS_DIR}/{slug}.mdx", f"{verifier.POSTS_DIR}/{slug}",
-               assets_dir, evidence_path]
-    _require_absent(blog, guarded)
+    absent = [f"{verifier.POSTS_DIR}/{slug}.mdx", f"{verifier.POSTS_DIR}/{slug}"]
+
+    def target_state() -> dict[str, str | None]:
+        return _target_state(blog, [post_path, *absent, evidence_path], assets_dir, verifier.MAX_ASSET_BYTES)
+
+    before = target_state()
+    old = _owned_copy(blog, verifier, slug, before, absent)
 
     text = _draft_text(_read(verifier, blog, draft_path, verifier.MAX_POST_BYTES), draft_path)
     marker = render._PLACEHOLDER_RE.search(text)
@@ -721,22 +813,37 @@ def convert(blog: Path, slug: str, verifier, render) -> dict:
     try:
         verifier.parse_public_frontmatter(post, post_path)
         content = verifier.hash_parts(post_path, post, assets)
+        kept = old is not None and old["content_hash"] == content
         evidence = {
             "contract": 1, "slug": slug, "post_path": post_path,
-            "hash_algo": verifier.HASH_ALGO, "content_hash": content, "engine_version": version,
+            "hash_algo": verifier.HASH_ALGO, "content_hash": content,
+            "engine_version": old["engine_version"] if kept else version,
             "public_copy": {
                 "post_path": post_path, "post_digest": _sha256(post),
                 "assets": [{"path": path, "digest": _sha256(data)} for path, data in assets.items()],
                 "engine_version": version,
             },
-            "records": [],
+            "records": old["records"] if kept else [],
         }
         verifier.validate_evidence(evidence)
     except verifier.VerifyError:
         raise CliError("convert_output_invalid", post_path) from None
-    files = {**assets, post_path: post,
-             evidence_path: (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8")}
-    apply_unit(blog, inbox, files, guarded, verifier.MAX_ASSET_BYTES)
+    files: dict[str, bytes | None] = {
+        **assets, post_path: post,
+        evidence_path: (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+    }
+    stale = [path for path in before if path.startswith(f"{assets_dir}/") and path not in files]
+    changes = {path: data for path, data in files.items() if before.get(path) != _sha256(data)}
+    changes.update(dict.fromkeys(stale))
+
+    def recheck() -> None:
+        now = target_state()
+        for relative in sorted(set(before) | set(now)):
+            if before.get(relative) != now.get(relative):
+                raise CliError("target_changed", relative)
+
+    if changes:
+        apply_unit(blog, inbox, changes, before, recheck, verifier.MAX_ASSET_BYTES)
     return {"post_path": post_path, "assets": list(assets), "evidence": evidence_path, "content_hash": content}
 
 

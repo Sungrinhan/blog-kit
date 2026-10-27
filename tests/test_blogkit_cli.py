@@ -720,3 +720,190 @@ def test_reference_definitions_and_angle_destinations_are_rewritten(engine: Engi
         "![logo](../../assets/posts/first-post/logo.svg)\n"
         "[site]: https://example.com/b\n"
     )
+
+
+# ------------------------------------------------------------------ convert: again over its own copy
+
+PNG_V2 = b"\x89PNG\r\n\x1a\n" + b"fake png bytes, second version"
+
+
+def _gate_record(content_hash: str) -> dict:
+    return {"kind": "gate", "gate": 1, "passed": True, "warnings": [],
+            "content_hash": content_hash, "engine_version": VERSION}
+
+
+def _converted(engine: Engine) -> dict:
+    """A first conversion plus one gate record, as later commands would leave it."""
+    _draft(engine)
+    rc, _, output = engine.run("convert", SLUG)
+    assert rc == 0, output
+    evidence = json.loads((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+    evidence["records"] = [_gate_record(evidence["content_hash"])]
+    (engine.blog / EVIDENCE).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+    return evidence
+
+
+def test_reconverting_a_recorded_copy_starts_new_evidence(engine: Engine) -> None:
+    old = _converted(engine)
+    draft = engine.blog / "inbox" / SLUG / "draft"
+    (draft / "images" / "diagram.png").write_bytes(PNG_V2)
+    (draft / "chart.png").write_bytes(PNG)
+    (draft / f"{SLUG}.md").write_text(FRONTMATTER + "\nNew body ![d](images/diagram.png) ![c](chart.png)\n",
+                                      encoding="utf-8")
+
+    rc, payload, output = engine.run("convert", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+
+    post = (engine.blog / POST).read_bytes()
+    assert post.decode("utf-8").endswith(
+        "---\n\nNew body ![d](../../assets/posts/first-post/diagram.png)"
+        " ![c](../../assets/posts/first-post/chart.png)\n")
+    assert sorted(p.name for p in (engine.blog / ASSETS).iterdir()) == ["chart.png", "diagram.png"]
+    assert (engine.blog / ASSETS / "diagram.png").read_bytes() == PNG_V2
+
+    evidence = json.loads((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+    verifier = _verifier()
+    verifier.validate_evidence(evidence)
+    new_hash = verifier.content_hash(engine.blog, SLUG)
+    assert new_hash != old["content_hash"]
+    assert evidence["content_hash"] == payload["content_hash"] == new_hash
+    assert evidence["records"] == []
+    assert evidence["engine_version"] == VERSION
+    assert evidence["public_copy"] == {
+        "post_path": POST, "post_digest": _sha(post),
+        "assets": [
+            {"path": f"{ASSETS}/chart.png", "digest": _sha(PNG)},
+            {"path": f"{ASSETS}/diagram.png", "digest": _sha(PNG_V2)},
+        ],
+        "engine_version": VERSION,
+    }
+    assert not (engine.blog / "inbox" / SLUG / ".convert-stage").exists()
+    assert not (engine.blog / "inbox" / SLUG / ".convert-backup").exists()
+    assert not (engine.blog / "inbox" / SLUG / "convert-journal.json").exists()
+    _no_leak(output)
+
+
+def test_reconverting_the_same_content_keeps_the_records(engine: Engine) -> None:
+    old = _converted(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+    evidence = json.loads((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+    assert evidence == old
+
+
+def _rewrite_draft(e: Engine) -> None:
+    """A changed draft, so an overwrite would show."""
+    (e.blog / "inbox" / SLUG / "draft" / f"{SLUG}.md").write_text(FRONTMATTER + "\nChanged body\n", encoding="utf-8")
+
+
+def _published(e: Engine) -> None:
+    post = e.blog / POST
+    post.write_text(post.read_text(encoding="utf-8").replace("draft: true\n", "draft: false\n"), encoding="utf-8")
+
+
+def _hand_edited(e: Engine) -> None:
+    with (e.blog / POST).open("a", encoding="utf-8") as handle:
+        handle.write("A line written by hand.\n")
+
+
+def _unowned_asset(e: Engine) -> None:
+    (e.blog / ASSETS / "extra.png").write_bytes(PNG)
+
+
+def _changed_asset(e: Engine) -> None:
+    (e.blog / ASSETS / "diagram.png").write_bytes(PNG_V2)
+
+
+def _missing_asset(e: Engine) -> None:
+    (e.blog / ASSETS / "logo.svg").unlink()
+
+
+def _broken_evidence(e: Engine) -> None:
+    (e.blog / EVIDENCE).write_text("{}\n", encoding="utf-8")
+
+
+TEMPLATE_POST = (
+    "---\n"
+    "title: 'First post'\n"
+    "description: 'Lorem ipsum dolor sit amet'\n"
+    "pubDate: 'Jul 08 2022'\n"
+    "heroImage: '../../assets/blog-placeholder-3.jpg'\n"
+    "draft: true\n"
+    "---\n"
+    "\n"
+    "Lorem ipsum dolor sit amet.\n"
+)
+
+
+def _template_post(e: Engine) -> None:
+    _draft(e)
+    (e.blog / POST).write_text(TEMPLATE_POST, encoding="utf-8")
+
+
+OVERWRITE_REFUSALS = [
+    ("published post", _published, "target_published", POST),
+    ("hand-edited post", _hand_edited, "target_modified", POST),
+    ("unowned asset", _unowned_asset, "asset_unowned", f"{ASSETS}/extra.png"),
+    ("changed asset", _changed_asset, "target_modified", f"{ASSETS}/diagram.png"),
+    ("missing asset", _missing_asset, "target_modified", f"{ASSETS}/logo.svg"),
+    ("broken evidence", _broken_evidence, "evidence_invalid", EVIDENCE),
+]
+
+
+@pytest.mark.parametrize("change,code,path", [case[1:] for case in OVERWRITE_REFUSALS],
+                         ids=[case[0] for case in OVERWRITE_REFUSALS])
+def test_reconvert_refusals_change_nothing(engine: Engine, change, code: str, path: str) -> None:
+    _converted(engine)
+    change(engine)
+    _rewrite_draft(engine)
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == [code], output
+    assert payload["errors"][0]["path"] == path
+    assert _tree(engine) == before
+    _no_leak(output)
+
+
+def test_a_template_post_without_a_record_is_kept(engine: Engine) -> None:
+    _template_post(engine)
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == ["target_exists"], output
+    assert payload["errors"][0]["path"] == POST
+    assert _tree(engine) == before
+
+
+def test_a_published_template_post_is_kept(engine: Engine) -> None:
+    # Outside the public grammar the status is unclear, so it is refused as a file without a record.
+    _draft(engine)
+    (engine.blog / POST).write_text(TEMPLATE_POST.replace("draft: true", "draft: false"), encoding="utf-8")
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == ["target_exists"], output
+    assert _tree(engine) == before
+
+
+def test_a_recorded_target_that_changes_before_the_moves_stops_the_unit(engine: Engine) -> None:
+    _converted(engine)
+    _rewrite_draft(engine)
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG, script=_bootstrap(engine, "appear-before-apply"))
+    assert rc == 1 and _codes(payload) == ["target_changed"], output
+    assert payload["errors"][0]["path"] == POST
+    after = _tree(engine)
+    assert after.pop(POST) == b"made by hand\n"
+    before.pop(POST)
+    assert after == before
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_a_failed_move_while_reconverting_restores_the_old_copy(engine: Engine, count: int) -> None:
+    _converted(engine)
+    draft = engine.blog / "inbox" / SLUG / "draft"
+    (draft / "images" / "diagram.png").write_bytes(PNG_V2)
+    (draft / f"{SLUG}.md").write_text(FRONTMATTER + "\nNew body ![d](images/diagram.png)\n", encoding="utf-8")
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG, script=_bootstrap(engine, "fail-target", count))
+    assert rc == 1 and _codes(payload) == ["apply_failed"], output
+    assert payload["rolled_back"] is True
+    assert _tree(engine) == before
