@@ -21,8 +21,22 @@ of a git work tree. Commands that change the evidence or the public copy
 records the process id and host; only a lock left by a dead process on this
 host is cleared.
 
-Output holds fixed error codes, check ids and reasons, versions and
-repo-relative paths only. It never prints post text, external command output
+convert creates the first public copy from the upstream-format draft. The
+draft frontmatter is a restricted subset (title, description of at most 160
+characters, date, optional lastUpdated and tags, and dropped upstream keys);
+any other key fails. References are sorted in this order: a backslash or a
+scheme-less authority is refused, a scheme or authority makes an external URL
+that the upstream renderer's link-safety rule must allow, "/" and "#" stay as
+site URLs and anchors, and the rest are file references that must name an
+image inside the draft folder; those are copied to the post's asset folder
+and rewritten. A remaining draft marker fails. An existing post, asset folder
+or evidence for the slug is refused. The post, assets and new evidence go in
+as one unit: staged under inbox/<slug>/, a journal, a re-check that the
+targets are still absent, one rename per target, an applied mark, then
+cleanup. A handled error while moving rolls the unit back on the spot.
+
+Output holds fixed error codes, check ids and reasons, versions,
+repo-relative paths and line numbers only. It never prints post text, external command output
 or URLs.
 
 Usage:
@@ -32,20 +46,26 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import importlib.util
 import json
 import os
+import posixpath
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 INSTALL_ROOT = Path(__file__).resolve().parent.parent.parent
 DOCTOR_PATH = INSTALL_ROOT / "scripts" / "doctor.py"
 VERIFIER_PATH = INSTALL_ROOT / "adapters" / "astro" / "blogkit_verify.py"
 MANIFEST_PATH = INSTALL_ROOT / ".claude-plugin" / "plugin.json"
+RENDER_PATH = INSTALL_ROOT / "scripts" / "blog_render.py"
 VERIFIER_COPY = "scripts/blogkit_verify.py"
 IDENTITY_TIMEOUT = 20.0
 COMMAND_TIMEOUT = 60.0
@@ -57,15 +77,41 @@ LOCK_COMMANDS = ("convert", "check", "approve", "publish")
 LOCK_NAME = "blogkit.lock"
 MAX_LOCK_BYTES = 4096
 
+# convert: the restricted subset of the upstream draft frontmatter.
+DRAFT_KEPT_KEYS = ("title", "description", "date", "lastUpdated", "tags")
+DRAFT_DROPPED_KEYS = frozenset({"author", "canonical", "lang", "kicker", "og_image_alt"})
+DRAFT_REQUIRED_KEYS = ("title", "description", "date")
+MAX_DESCRIPTION = 160
+DRAFT_KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*):(?: (.*))?")
+DRAFT_ITEM_RE = re.compile(r"  - (.*)")
+SINGLE_QUOTED_RE = re.compile(r"'((?:[^']|'')*)'")
+# A YAML plain scalar that cannot be read as anything but this string.
+PLAIN_RE = re.compile(r"""[^\s\-?:,\[\]{}#&*!|>'"%@`](?:[^#:]|:(?! )|(?<! )#)*""")
+FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# A Markdown inline destination right after "](", and a reference definition.
+INLINE_DEST_RE = re.compile(r"\]\([ \t]*(<[^<>\n]*>|[^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*)(?=[ \t\n)])")
+REF_DEF_RE = re.compile(r"^ {0,3}\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(<[^<>\n]*>|\S+)", re.MULTILINE)
+FILE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
+STAGE_DIR = ".convert-stage"
+BACKUP_DIR = ".convert-backup"
+JOURNAL_NAME = "convert-journal.json"
+
 
 class CliError(Exception):
-    """A fixed error code, an optional repo-relative path and safe extra fields."""
+    """A fixed error code, an optional repo-relative path and line, and safe extra fields."""
 
-    def __init__(self, code: str, path: str = "", **fields) -> None:
+    def __init__(self, code: str, path: str = "", line: int | None = None, **fields) -> None:
         super().__init__(code)
         self.code = code
         self.path = path
+        self.line = line
         self.fields = fields
+
+    def error(self) -> dict:
+        error = {"code": self.code, "path": self.path}
+        if self.line is not None:
+            error["line"] = self.line
+        return error
 
 
 def _load(name: str, path: Path):
@@ -243,6 +289,457 @@ class SlugLock:
             self.path.unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------- convert
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _json(value) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _read(verifier, blog: Path, relative: str, cap: int) -> bytes:
+    """A regular file in the blog repo, no symlink components, at most cap bytes."""
+    try:
+        return verifier._read_capped(blog, relative, cap)
+    except verifier.VerifyError as exc:
+        raise CliError(exc.code, exc.path) from None
+
+
+def _draft_text(data: bytes, path: str) -> str:
+    if data.startswith(b"\xef\xbb\xbf"):
+        raise CliError("bom_not_allowed", path)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CliError("not_utf8", path) from None
+    if "\r" in text:
+        raise CliError("crlf_not_allowed", path)
+    return text
+
+
+def _scalar(raw: str, path: str, line: int):
+    """A JSON or single-quoted string, a JSON list of strings, or a plain scalar."""
+    raw = raw.strip()
+    try:
+        if raw.startswith('"'):
+            value = json.loads(raw)
+            if isinstance(value, str):
+                return value
+        elif raw.startswith("["):
+            value = json.loads(raw)
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                return value
+        elif match := SINGLE_QUOTED_RE.fullmatch(raw):
+            return match[1].replace("''", "'")
+        elif PLAIN_RE.fullmatch(raw):
+            return raw
+    except json.JSONDecodeError:
+        pass
+    raise CliError("draft_frontmatter_grammar", path, line)
+
+
+def parse_draft_frontmatter(lines: list[str], path: str) -> dict:
+    """The draft's frontmatter lines (file line 2 onward) as key -> value, or raise.
+
+    Each entry is `key: value` or `key:` followed by `  - item` lines. Blank
+    and comment lines are skipped; any other YAML form is refused.
+    """
+    values: dict = {}
+    index = 0
+    while index < len(lines):
+        line, number = lines[index], index + 2
+        index += 1
+        if not line.strip() or line.startswith("#"):
+            continue
+        match = DRAFT_KEY_RE.fullmatch(line)
+        if match is None:
+            raise CliError("draft_frontmatter_grammar", path, number)
+        key, raw = match.groups()
+        if key in values:
+            raise CliError("draft_key_duplicate", path, number)
+        if key not in DRAFT_KEPT_KEYS and key not in DRAFT_DROPPED_KEYS:
+            raise CliError("draft_key_not_allowed", path, number)
+        if raw is not None and raw.strip():
+            values[key] = _scalar(raw, path, number)
+            continue
+        items = []
+        while index < len(lines) and (item := DRAFT_ITEM_RE.fullmatch(lines[index])):
+            value = _scalar(item[1], path, index + 2)
+            if not isinstance(value, str):
+                raise CliError("draft_frontmatter_grammar", path, index + 2)
+            items.append(value)
+            index += 1
+        values[key] = items
+    return values
+
+
+def _draft_date(verifier, values: dict, key: str, path: str) -> datetime.date:
+    value = values[key]
+    try:
+        if isinstance(value, str) and verifier.DATE_RE.fullmatch(value):
+            return datetime.date.fromisoformat(value)
+    except ValueError:
+        pass
+    raise CliError("date_invalid", path, key=key)
+
+
+def public_frontmatter(verifier, values: dict, path: str) -> str:
+    """The public-copy frontmatter (draft: true) for validated draft values."""
+    for key in DRAFT_REQUIRED_KEYS:
+        if key not in values:
+            raise CliError("draft_key_missing", path, key=key)
+    for key in ("title", "description"):
+        if not isinstance(values[key], str) or not values[key].strip():
+            raise CliError("draft_value_invalid", path, key=key)
+    if not isinstance(values.get("tags", []), list):
+        raise CliError("draft_value_invalid", path, key="tags")
+    if len(values["description"]) > MAX_DESCRIPTION:
+        raise CliError("description_too_long", path)
+    dates = {key: _draft_date(verifier, values, key, path) for key in ("date", "lastUpdated") if key in values}
+    if "lastUpdated" in dates and dates["lastUpdated"] < dates["date"]:
+        raise CliError("updated_before_date", path)
+    lines = [f"title: {_json(values['title'])}", f"description: {_json(values['description'])}",
+             f"pubDate: {_json(values['date'])}"]
+    if "lastUpdated" in values:
+        lines.append(f"updatedDate: {_json(values['lastUpdated'])}")
+    if "tags" in values:
+        lines.append(f"tags: {_json(values['tags'])}")
+    lines.append("draft: true")
+    return "---\n" + "\n".join(lines) + "\n---\n"
+
+
+def _inline_code(text: str, start: int, stop: int) -> list[tuple[int, int]]:
+    runs = list(re.finditer(r"`+", text[start:stop]))
+    ranges = []
+    index = 0
+    while index < len(runs):
+        opener = runs[index]
+        closer = next((j for j in range(index + 1, len(runs)) if len(runs[j][0]) == len(opener[0])), None)
+        if closer is None:
+            index += 1
+            continue
+        ranges.append((start + opener.start(), start + runs[closer].end()))
+        index = closer + 1
+    return ranges
+
+
+def _code_ranges(text: str) -> list[tuple[int, int]]:
+    """Character ranges of fenced code blocks and inline code spans."""
+    ranges: list[tuple[int, int]] = []
+    fence = None
+    segment = pos = 0
+    for line in text.splitlines(keepends=True):
+        start, pos = pos, pos + len(line)
+        stripped = line.rstrip("\n")
+        if fence is None:
+            match = FENCE_RE.match(stripped)
+            if match and not (match[1][0] == "`" and "`" in stripped[match.end():]):
+                ranges += _inline_code(text, segment, start)
+                fence = (match[1][0], len(match[1]), start)
+        elif re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{fence[1]},}}[ \t]*", stripped):
+            ranges.append((fence[2], pos))
+            fence = None
+            segment = pos
+    if fence is not None:
+        ranges.append((fence[2], len(text)))
+    else:
+        ranges += _inline_code(text, segment, len(text))
+    return ranges
+
+
+def _opener(text: str, close: int) -> int | None:
+    """Index of the "[" that the "]" at close ends, within one paragraph."""
+    depth = 0
+    for index in range(close - 1, -1, -1):
+        char = text[index]
+        if char in "[]" and index > 0 and text[index - 1] == "\\":
+            continue
+        if char == "]":
+            depth += 1
+        elif char == "[":
+            if depth == 0:
+                return index
+            depth -= 1
+        elif char == "\n" and index > 0 and text[index - 1] == "\n":
+            return None
+    return None
+
+
+def _references(body: str) -> list[tuple[int, int, str, bool]]:
+    """(start, end, destination, is_image) of each Markdown destination outside code."""
+    code = _code_ranges(body)
+
+    def in_code(pos: int) -> bool:
+        return any(start <= pos < end for start, end in code)
+
+    found = []
+    for match in INLINE_DEST_RE.finditer(body):
+        close = match.start()
+        if in_code(close) or (close > 0 and body[close - 1] == "\\"):
+            continue
+        opener = _opener(body, close)
+        if opener is not None:
+            found.append((match.start(1), match.end(1), match[1], opener > 0 and body[opener - 1] == "!"))
+    for match in REF_DEF_RE.finditer(body):
+        if not in_code(match.start()):
+            found.append((match.start(1), match.end(1), match[1], False))
+    return sorted(found)
+
+
+def _file_reference(dest: str, image: bool, render, path: str, line: int) -> str | None:
+    """None for a reference kept as it is, or the draft-relative file it names.
+
+    Order: a backslash or a scheme-less authority is refused (the upstream
+    link-safety rule), a scheme or authority makes an external URL that the
+    upstream rule must allow, "/" and "#" stay as site URLs and anchors, and
+    everything else is a file reference.
+    """
+    url = dest[1:-1] if dest.startswith("<") else dest
+    if not url or "\\" in url or url.startswith("//"):
+        raise CliError("reference_unsafe", path, line)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        raise CliError("reference_unsafe", path, line) from None
+    if parsed.scheme or parsed.netloc:
+        if not render._is_safe_url(url, media=image):
+            raise CliError("reference_scheme_not_allowed", path, line)
+        return None
+    if url.startswith(("/", "#")):
+        return None
+    return url
+
+
+def _asset_source(blog: Path, verifier, draft_folder: str, url: str, path: str, line: int) -> tuple[str, str]:
+    """(asset name, repo-relative source) for a file reference inside the draft folder."""
+    if not FILE_REF_RE.fullmatch(url):
+        raise CliError("reference_file_invalid", path, line)
+    normal = posixpath.normpath(url)
+    if normal == ".." or normal.startswith(("../", "/")):
+        raise CliError("reference_outside_draft", path, line)
+    source = f"{draft_folder}/{normal}"
+    refuse_symlinks(blog, source)
+    name = posixpath.basename(normal)
+    if Path(name).suffix.lower() not in verifier.ASSET_TYPES:
+        raise CliError("reference_not_image", path, line)
+    if not verifier.ASSET_NAME_RE.fullmatch(name) or Path(name).suffix not in verifier.ASSET_TYPES:
+        raise CliError("asset_name_invalid", path, line)
+    if not (blog / source).is_file():
+        raise CliError("reference_missing", path, line)
+    return name, source
+
+
+def _require_absent(blog: Path, paths: list[str]) -> None:
+    for relative in paths:
+        refuse_symlinks(blog, relative)
+        if os.path.lexists(blog / relative):
+            raise CliError("target_exists", relative)
+
+
+def _missing_dirs(blog: Path, paths) -> list[str]:
+    """Folders (shallowest first) that must be created to hold paths."""
+    missing: list[str] = []
+    for relative in paths:
+        parts = Path(relative).parent.parts
+        for depth in range(1, len(parts) + 1):
+            folder = "/".join(parts[:depth])
+            if folder not in missing and not os.path.lexists(blog / folder):
+                missing.append(folder)
+    return missing
+
+
+def _write_new(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _write_journal(path: Path, journal: dict) -> None:
+    temp = path.with_name(path.name + ".tmp")
+    temp.unlink(missing_ok=True)
+    _write_new(temp, (json.dumps(journal, indent=2) + "\n").encode("utf-8"))
+    os.replace(temp, path)
+
+
+def _file_digest(path: Path, cap: int) -> str | None:
+    """SHA-256 of a regular file, None when nothing is there, "unknown" otherwise."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "unknown"
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return "unknown"
+        data = handle.read(cap + 1)
+    return "unknown" if len(data) > cap else _sha256(data)
+
+
+def _discard(blog: Path, inbox: str) -> None:
+    """Remove the stage, backup and journal of a unit that was not applied or is done."""
+    for folder in (STAGE_DIR, BACKUP_DIR):
+        if os.path.lexists(blog / inbox / folder):
+            shutil.rmtree(blog / inbox / folder)
+    (blog / inbox / f"{JOURNAL_NAME}.tmp").unlink(missing_ok=True)
+    (blog / inbox / JOURNAL_NAME).unlink(missing_ok=True)
+
+
+def _roll_back(blog: Path, journal: dict, cap: int) -> bool:
+    """Undo a unit that was not marked applied, judging by the files that are there.
+
+    Nothing is changed when a target holds a file the journal does not know.
+    """
+    targets = journal["targets"]
+    digests = [_file_digest(blog / target["path"], cap) for target in targets]
+    if any(digest not in (None, target["new_digest"]) for digest, target in zip(digests, targets)):
+        return False
+    try:
+        for digest, target in zip(reversed(digests), reversed(targets)):
+            if digest is None:
+                continue
+            if os.path.lexists(blog / target["staged"]):
+                (blog / target["path"]).unlink()
+            else:
+                os.replace(blog / target["path"], blog / target["staged"])
+        for folder in reversed(journal["created_dirs"]):
+            if os.path.lexists(blog / folder):
+                os.rmdir(blog / folder)
+    except OSError:
+        return False
+    return True
+
+
+def apply_unit(blog: Path, inbox: str, files: dict[str, bytes], guarded: list[str], cap: int) -> None:
+    """Put new files in place as one unit.
+
+    Stage every file under inbox/<slug>/, write the journal (per target: path,
+    whether it existed, original and new digest, staged and backup location,
+    plus the folders to create and an applied flag), check that the guarded
+    targets are still absent, move each staged file into place, mark the
+    journal applied, then remove the stage, backups and journal. A handled
+    error while moving rolls the unit back on the spot.
+    """
+    stage = f"{inbox}/{STAGE_DIR}"
+    journal_path = blog / inbox / JOURNAL_NAME
+    refuse_symlinks(blog, stage)
+    refuse_symlinks(blog, f"{inbox}/{JOURNAL_NAME}")
+    if os.path.lexists(blog / stage) or os.path.lexists(journal_path):
+        raise CliError("convert_leftover", inbox)
+    targets = [
+        {"path": path, "existed": False, "original_digest": None, "new_digest": _sha256(data),
+         "staged": f"{stage}/{index}", "backup": f"{inbox}/{BACKUP_DIR}/{index}"}
+        for index, (path, data) in enumerate(files.items())
+    ]
+    journal = {"journal": 1, "applied": False, "created_dirs": _missing_dirs(blog, files), "targets": targets}
+    try:
+        os.mkdir(blog / stage)
+        for target, data in zip(targets, files.values()):
+            _write_new(blog / target["staged"], data)
+        _write_journal(journal_path, journal)
+    except OSError:
+        _discard(blog, inbox)
+        raise CliError("stage_failed", stage) from None
+    try:
+        _require_absent(blog, guarded)
+    except CliError as exc:
+        _discard(blog, inbox)
+        raise CliError("target_changed", exc.path) from None
+    try:
+        for folder in journal["created_dirs"]:
+            os.mkdir(blog / folder)
+        for target in targets:
+            os.replace(blog / target["staged"], blog / target["path"])
+    except OSError:
+        if not _roll_back(blog, journal, cap):
+            raise CliError("apply_failed", f"{inbox}/{JOURNAL_NAME}", rolled_back=False) from None
+        _discard(blog, inbox)
+        raise CliError("apply_failed", rolled_back=True) from None
+    journal["applied"] = True
+    try:
+        _write_journal(journal_path, journal)
+        _discard(blog, inbox)
+    except OSError:
+        raise CliError("cleanup_failed", f"{inbox}/{JOURNAL_NAME}") from None
+
+
+def convert(blog: Path, slug: str, verifier, render) -> dict:
+    """Create the first public copy (draft: true), its assets and new evidence."""
+    inbox = f"{verifier.INBOX_DIR}/{slug}"
+    draft_folder = f"{inbox}/draft"
+    draft_path = f"{draft_folder}/{slug}.md"
+    post_path = verifier.post_path_for(slug)
+    assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
+    evidence_path = f"{inbox}/{verifier.EVIDENCE_NAME}"
+    guarded = [post_path, f"{verifier.POSTS_DIR}/{slug}.mdx", f"{verifier.POSTS_DIR}/{slug}",
+               assets_dir, evidence_path]
+    _require_absent(blog, guarded)
+
+    text = _draft_text(_read(verifier, blog, draft_path, verifier.MAX_POST_BYTES), draft_path)
+    marker = render._PLACEHOLDER_RE.search(text)
+    if marker:
+        raise CliError("marker_left", draft_path, text.count("\n", 0, marker.start()) + 1)
+    lines = text.split("\n")
+    if lines[0] != "---":
+        raise CliError("frontmatter_missing", draft_path)
+    if "---" not in lines[1:]:
+        raise CliError("frontmatter_unclosed", draft_path)
+    close = lines.index("---", 1)
+    header = public_frontmatter(verifier, parse_draft_frontmatter(lines[1:close], draft_path), draft_path)
+    body = "\n".join(lines[close + 1:])
+    first_body_line = close + 2
+
+    asset_link = posixpath.relpath(assets_dir, verifier.POSTS_DIR)
+    sources: dict[str, str] = {}
+    pieces: list[str] = []
+    last = 0
+    for start, end, dest, image in _references(body):
+        line = first_body_line + body.count("\n", 0, start)
+        url = _file_reference(dest, image, render, draft_path, line)
+        if url is None:
+            continue
+        name, source = _asset_source(blog, verifier, draft_folder, url, draft_path, line)
+        if sources.setdefault(name, source) != source:
+            raise CliError("asset_name_collision", draft_path, line)
+        pieces += [body[last:start], f"{asset_link}/{name}"]
+        last = end
+    post = (header + "".join(pieces) + body[last:]).encode("utf-8")
+    if len(post) > verifier.MAX_POST_BYTES:
+        raise CliError("file_too_large", post_path)
+
+    assets: dict[str, bytes] = {}
+    for name, source in sorted(sources.items()):
+        assets[f"{assets_dir}/{name}"] = _read(verifier, blog, source, verifier.MAX_ASSET_BYTES)
+        if sum(map(len, assets.values())) > verifier.MAX_ASSETS_TOTAL:
+            raise CliError("assets_too_large", draft_folder)
+    version = engine_version()
+    try:
+        verifier.parse_public_frontmatter(post, post_path)
+        content = verifier.hash_parts(post_path, post, assets)
+        evidence = {
+            "contract": 1, "slug": slug, "post_path": post_path,
+            "hash_algo": verifier.HASH_ALGO, "content_hash": content, "engine_version": version,
+            "public_copy": {
+                "post_path": post_path, "post_digest": _sha256(post),
+                "assets": [{"path": path, "digest": _sha256(data)} for path, data in assets.items()],
+                "engine_version": version,
+            },
+            "records": [],
+        }
+        verifier.validate_evidence(evidence)
+    except verifier.VerifyError:
+        raise CliError("convert_output_invalid", post_path) from None
+    files = {**assets, post_path: post,
+             evidence_path: (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8")}
+    apply_unit(blog, inbox, files, guarded, verifier.MAX_ASSET_BYTES)
+    return {"post_path": post_path, "assets": list(assets), "evidence": evidence_path, "content_hash": content}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="blog-kit engine CLI for an Astro blog repo.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -272,11 +769,13 @@ def run(args: argparse.Namespace, blog: Path) -> dict:
         raise CliError("slug_invalid")
     if args.command in LOCK_COMMANDS:
         with SlugLock(blog, args.slug):
-            return dispatch(args, blog)
-    return dispatch(args, blog)
+            return dispatch(args, blog, verifier)
+    return dispatch(args, blog, verifier)
 
 
-def dispatch(args: argparse.Namespace, blog: Path) -> dict:
+def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
+    if args.command == "convert":
+        return convert(blog, args.slug, verifier, _load("blog_render", RENDER_PATH))
     raise CliError("not_implemented")
 
 
@@ -290,7 +789,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report.update(run(args, blog), status="ok", errors=[])
     except CliError as exc:
-        report.update(exc.fields, errors=[{"code": exc.code, "path": exc.path}])
+        report.update(exc.fields, errors=[exc.error()])
     print(json.dumps(report, indent=2))
     return 0 if report["status"] == "ok" else 1
 

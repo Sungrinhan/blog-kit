@@ -28,6 +28,7 @@ ENGINE_FILES = (
     "adapters/astro/blogkit.py",
     "adapters/astro/blogkit_verify.py",
     "scripts/doctor.py",
+    "scripts/blog_render.py",
     ".claude-plugin/plugin.json",
 )
 PLUGIN_ID = "claude-blog@blog-kit"
@@ -256,7 +257,7 @@ def _dead_pid() -> int:
 
 def test_a_locking_command_releases_its_lock(engine: Engine) -> None:
     lock = _lock(engine)
-    rc, payload, _ = engine.run("convert", "first-post")
+    rc, payload, _ = engine.run("check", "first-post")
     assert _codes(payload) == ["not_implemented"]
     assert not lock.exists()
 
@@ -355,3 +356,367 @@ def test_external_output_is_dropped_except_repo_paths_and_lines(engine: Engine) 
     assert payload["locations"] == ["src/content/posts/first-post.md:3", "src/content/posts/first-post.md:7"]
     _no_leak(output)
     assert "/etc/hosts" not in output and "fatal" not in output
+
+
+# ------------------------------------------------------------------ convert: first conversion
+
+SLUG = "first-post"
+PNG = b"\x89PNG\r\n\x1a\n" + b"fake png bytes"
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>\n'
+FRONTMATTER = (
+    "---\n"
+    'title: "첫 글: 가짜 제목"\n'
+    'description: "가짜 설명입니다"\n'
+    'date: "2026-01-02"\n'
+    'lastUpdated: "2026-01-05"\n'
+    'author: "Fake Author"\n'
+    'canonical: "https://site.example/posts/first-post/"\n'
+    'lang: "ko"\n'
+    'kicker: "Fake kicker"\n'
+    'og_image_alt: "Fake alt text"\n'
+    'tags: ["alpha", "베타"]\n'
+    "---\n"
+)
+BODY = (
+    "\n"
+    "# Heading\n"
+    "\n"
+    '![Diagram](images/diagram.png "Fake title")\n'
+    "See [the guide](/posts/other/), [the section](#heading), [a site](https://example.com/a)"
+    " and [mail](mailto:someone@example.com).\n"
+    "![remote](https://example.com/remote.png)\n"
+    "Again ![same](images/diagram.png) and [![logo](logo.svg)](/about/).\n"
+    "\n"
+    "```md\n"
+    "![inside a fence](not-there.png)\n"
+    "```\n"
+    "Inline `![inside code](also-not-there.png)` too.\n"
+)
+EXPECTED_POST = (
+    "---\n"
+    'title: "첫 글: 가짜 제목"\n'
+    'description: "가짜 설명입니다"\n'
+    'pubDate: "2026-01-02"\n'
+    'updatedDate: "2026-01-05"\n'
+    'tags: ["alpha", "베타"]\n'
+    "draft: true\n"
+    "---\n"
+    "\n"
+    "# Heading\n"
+    "\n"
+    '![Diagram](../../assets/posts/first-post/diagram.png "Fake title")\n'
+    "See [the guide](/posts/other/), [the section](#heading), [a site](https://example.com/a)"
+    " and [mail](mailto:someone@example.com).\n"
+    "![remote](https://example.com/remote.png)\n"
+    "Again ![same](../../assets/posts/first-post/diagram.png) and"
+    " [![logo](../../assets/posts/first-post/logo.svg)](/about/).\n"
+    "\n"
+    "```md\n"
+    "![inside a fence](not-there.png)\n"
+    "```\n"
+    "Inline `![inside code](also-not-there.png)` too.\n"
+)
+POST = f"src/content/posts/{SLUG}.md"
+ASSETS = f"src/assets/posts/{SLUG}"
+EVIDENCE = f"inbox/{SLUG}/publish-evidence.json"
+
+
+def _draft(engine: Engine, frontmatter: str = FRONTMATTER, body: str = BODY) -> Path:
+    folder = engine.blog / "inbox" / SLUG / "draft"
+    (folder / "images").mkdir(parents=True, exist_ok=True)
+    (folder / "images" / "diagram.png").write_bytes(PNG)
+    (folder / "logo.svg").write_bytes(SVG)
+    draft = folder / f"{SLUG}.md"
+    draft.write_text(frontmatter + body, encoding="utf-8")
+    return draft
+
+
+def _tree(engine: Engine) -> dict[str, bytes]:
+    """Every file in the blog repo outside .git and .claude (the harness rewrites settings each run)."""
+    files = {}
+    for path in sorted(engine.blog.rglob("*")):
+        relative = path.relative_to(engine.blog).as_posix()
+        if relative.split("/")[0] in (".git", ".claude"):
+            continue
+        files[relative] = path.read_bytes() if path.is_file() and not path.is_symlink() else b"<dir>"
+    return files
+
+
+def _verifier():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("verifier_oracle", ROOT / "adapters" / "astro" / "blogkit_verify.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _sha(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_convert_creates_the_first_public_copy(engine: Engine) -> None:
+    _draft(engine)
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert (rc, payload["status"], payload["errors"]) == (0, "ok", []), output
+
+    post = (engine.blog / POST).read_bytes()
+    assert post.decode("utf-8") == EXPECTED_POST
+    assert (engine.blog / ASSETS / "diagram.png").read_bytes() == PNG
+    assert (engine.blog / ASSETS / "logo.svg").read_bytes() == SVG
+    assert sorted(p.name for p in (engine.blog / ASSETS).iterdir()) == ["diagram.png", "logo.svg"]
+
+    evidence = json.loads((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+    verifier = _verifier()
+    verifier.validate_evidence(evidence)
+    assert evidence == {
+        "contract": 1, "slug": SLUG, "post_path": POST,
+        "hash_algo": "blogkit-content-v1", "content_hash": verifier.content_hash(engine.blog, SLUG),
+        "engine_version": VERSION,
+        "public_copy": {
+            "post_path": POST, "post_digest": _sha(post),
+            "assets": [
+                {"path": f"{ASSETS}/diagram.png", "digest": _sha(PNG)},
+                {"path": f"{ASSETS}/logo.svg", "digest": _sha(SVG)},
+            ],
+            "engine_version": VERSION,
+        },
+        "records": [],
+    }
+    assert payload["content_hash"] == evidence["content_hash"]
+
+    # Only the three targets were added; the draft folder and the rest are untouched.
+    after = _tree(engine)
+    added = sorted(set(after) - set(before))
+    assert added == sorted(["src/assets", "src/assets/posts", ASSETS, f"{ASSETS}/diagram.png",
+                            f"{ASSETS}/logo.svg", EVIDENCE, POST])
+    assert {k: after[k] for k in before} == before
+    _no_leak(output)
+    assert "example.com" not in output
+
+
+# ------------------------------------------------------------------ convert: refusals leave the repo unchanged
+
+
+def _fm(old: str, new: str):
+    def change(e: Engine) -> None:
+        assert old in FRONTMATTER
+        _draft(e, frontmatter=FRONTMATTER.replace(old, new))
+    return change
+
+
+def _body(text: str):
+    def change(e: Engine) -> None:
+        _draft(e, body=BODY + text)
+    return change
+
+
+def _existing(relative: str, folder: bool = False):
+    def change(e: Engine) -> None:
+        _draft(e)
+        target = e.blog / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if folder:
+            target.mkdir()
+        else:
+            target.write_bytes(b"made by hand\n")
+    return change
+
+
+def _collision(e: Engine) -> None:
+    _draft(e, body=BODY + "![other](other/diagram.png)\n")
+    (e.blog / "inbox" / SLUG / "draft" / "other").mkdir()
+    (e.blog / "inbox" / SLUG / "draft" / "other" / "diagram.png").write_bytes(PNG + b"other")
+
+
+def _non_image(e: Engine) -> None:
+    _draft(e, body=BODY + "[notes](notes.txt)\n")
+    (e.blog / "inbox" / SLUG / "draft" / "notes.txt").write_text("fake notes\n")
+
+
+def _outside_file(e: Engine) -> None:
+    _draft(e, body=BODY + "![up](../outside.png)\n")
+    (e.blog / "inbox" / SLUG / "outside.png").write_bytes(PNG)
+
+
+def _upper_name(e: Engine) -> None:
+    _draft(e, body=BODY + "![upper](Upper.png)\n")
+    (e.blog / "inbox" / SLUG / "draft" / "Upper.png").write_bytes(PNG)
+
+
+def _symlinked_image(e: Engine) -> None:
+    _draft(e, body=BODY + "![link](linked.png)\n")
+    real = e.tmp / "outside.png"
+    real.write_bytes(PNG)
+    (e.blog / "inbox" / SLUG / "draft" / "linked.png").symlink_to(real)
+
+
+def _raw_draft(data: bytes):
+    def change(e: Engine) -> None:
+        _draft(e).write_bytes(data)
+    return change
+
+
+def _symlinked_draft(e: Engine) -> None:
+    draft = _draft(e)
+    real = e.tmp / "outside-draft.md"
+    real.write_bytes(draft.read_bytes())
+    draft.unlink()
+    draft.symlink_to(real)
+
+
+def _symlinked_draft_folder(e: Engine) -> None:
+    folder = _draft(e).parent
+    real = e.tmp / "outside-draft-folder"
+    folder.rename(real)
+    folder.symlink_to(real)
+
+
+def _symlinked_assets_parent(e: Engine) -> None:
+    _draft(e)
+    real = e.tmp / "outside-assets"
+    real.mkdir()
+    (e.blog / "src" / "assets").symlink_to(real)
+
+
+BODY_FIRST_LINE = FRONTMATTER.count("\n") + 1
+APPENDED_LINE = BODY_FIRST_LINE + BODY.count("\n")
+
+REFUSALS = [
+    ("unknown key", _fm('lang: "ko"\n', 'lang: "ko"\nsummary: "x"\n'), "draft_key_not_allowed", 9),
+    ("alias dateModified", _fm('lang: "ko"\n', 'lang: "ko"\ndateModified: "2026-01-05"\n'), "draft_key_not_allowed", 9),
+    ("alias slug", _fm('lang: "ko"\n', 'lang: "ko"\nslug: "first-post"\n'), "draft_key_not_allowed", 9),
+    ("alias site_name", _fm('lang: "ko"\n', 'lang: "ko"\nsite_name: "Fake"\n'), "draft_key_not_allowed", 9),
+    ("duplicate key", _fm('lang: "ko"\n', 'lang: "ko"\nlang: "en"\n'), "draft_key_duplicate", 9),
+    ("block scalar", _fm('title: "첫 글: 가짜 제목"\n', "title: >\n  folded\n"), "draft_frontmatter_grammar", 2),
+    ("anchor", _fm('kicker: "Fake kicker"\n', "kicker: &a Fake\n"), "draft_frontmatter_grammar", 9),
+    ("description over 160", _fm('description: "가짜 설명입니다"\n', f'description: "{"가" * 161}"\n'),
+     "description_too_long", None),
+    ("missing date", _fm('date: "2026-01-02"\n', ""), "draft_key_missing", None),
+    ("impossible date", _fm('date: "2026-01-02"\n', 'date: "2026-02-30"\n'), "date_invalid", None),
+    ("date format", _fm('date: "2026-01-02"\n', 'date: "2026/01/02"\n'), "date_invalid", None),
+    ("updated before date", _fm('lastUpdated: "2026-01-05"\n', 'lastUpdated: "2026-01-01"\n'),
+     "updated_before_date", None),
+    ("marker", _body("[IMAGE: a fake marker]\n"), "marker_left", APPENDED_LINE),
+    ("outside the draft folder", _outside_file, "reference_outside_draft", APPENDED_LINE),
+    ("non-image file", _non_image, "reference_not_image", APPENDED_LINE),
+    ("missing file", _body("![gone](gone.png)\n"), "reference_missing", APPENDED_LINE),
+    ("name collision", _collision, "asset_name_collision", APPENDED_LINE),
+    ("asset name", _upper_name, "asset_name_invalid", APPENDED_LINE),
+    ("scheme-less authority", _body("![host](//example.com/x.png)\n"), "reference_unsafe", APPENDED_LINE),
+    ("backslash", _body("![win](images\\diagram.png)\n"), "reference_unsafe", APPENDED_LINE),
+    ("javascript link", _body("[x](javascript:alert(1))\n"), "reference_scheme_not_allowed", APPENDED_LINE),
+    ("mailto image", _body("![x](mailto:someone@example.com)\n"), "reference_scheme_not_allowed", APPENDED_LINE),
+    ("query on a file", _body("![q](logo.svg?v=1)\n"), "reference_file_invalid", APPENDED_LINE),
+    ("symlinked image", _symlinked_image, "symlink_refused", None),
+    ("crlf", _raw_draft((FRONTMATTER + BODY).replace("\n", "\r\n").encode()), "crlf_not_allowed", None),
+    ("bom", _raw_draft(b"\xef\xbb\xbf" + (FRONTMATTER + BODY).encode()), "bom_not_allowed", None),
+    ("symlinked draft", _symlinked_draft, "symlink_refused", None),
+    ("symlinked draft folder", _symlinked_draft_folder, "symlink_refused", None),
+    ("symlinked assets parent", _symlinked_assets_parent, "symlink_refused", None),
+    ("draft over 1MB", _body("x" * (1024 * 1024)), "file_too_large", None),
+    ("existing post", _existing(POST), "target_exists", None),
+    ("existing mdx post", _existing(f"src/content/posts/{SLUG}.mdx"), "target_exists", None),
+    ("existing asset folder", _existing(ASSETS, folder=True), "target_exists", None),
+    ("existing evidence", _existing(EVIDENCE), "target_exists", None),
+]
+
+
+@pytest.mark.parametrize("setup,code,line", [case[1:] for case in REFUSALS], ids=[case[0] for case in REFUSALS])
+def test_convert_refusals_change_nothing(engine: Engine, setup, code: str, line: int | None) -> None:
+    setup(engine)
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == [code], output
+    if line is not None:
+        assert payload["errors"][0]["line"] == line
+    assert _tree(engine) == before
+    _no_leak(output)
+    assert "example.com" not in output and "가짜" not in output
+
+
+def test_a_description_of_exactly_160_characters_is_kept(engine: Engine) -> None:
+    _draft(engine, frontmatter=FRONTMATTER.replace('"가짜 설명입니다"', f'"{"가" * 160}"'))
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 0, output
+    assert f'description: "{"가" * 160}"\n' in (engine.blog / POST).read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------------------ convert: one unit
+
+BOOTSTRAP = '''\
+"""Test bootstrap: run the installed CLI with os.replace swapped (failure injection)."""
+import os
+import runpy
+import sys
+from pathlib import Path
+
+cli, blog, mode, count = sys.argv[1], Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+real_replace = os.replace
+seen = 0
+
+
+def replace(src, dst, *args, **kwargs):
+    global seen
+    relative = Path(dst).relative_to(blog).as_posix()
+    internal = "/.convert-stage/" in relative or "/.convert-backup/" in relative or "convert-journal" in relative
+    if mode == "fail-target" and not internal:
+        seen += 1
+        if seen == count:
+            raise OSError("injected failure")
+    real_replace(src, dst, *args, **kwargs)
+    if mode == "appear-before-apply" and relative.endswith("/convert-journal.json"):
+        (blog / "src" / "content" / "posts" / "first-post.md").write_text("made by hand\\n")
+
+
+os.replace = replace
+sys.argv = [cli, *sys.argv[5:]]
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
+def _bootstrap(engine: Engine, mode: str, count: int = 0) -> Path:
+    script = engine.tmp / "bootstrap.py"
+    script.write_text(BOOTSTRAP)
+    wrapper = engine.tmp / "run-bootstrap.py"
+    wrapper.write_text(
+        "import runpy, sys\n"
+        f"sys.argv = [{str(script)!r}, {str(engine.cli)!r}, {str(engine.blog)!r}, {mode!r}, '{count}', *sys.argv[1:]]\n"
+        f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    return wrapper
+
+
+@pytest.mark.parametrize("count", [2, 3, 4])
+def test_a_failed_later_move_rolls_the_unit_back(engine: Engine, count: int) -> None:
+    _draft(engine)
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG, script=_bootstrap(engine, "fail-target", count))
+    assert rc == 1 and _codes(payload) == ["apply_failed"], output
+    assert payload["rolled_back"] is True
+    assert _tree(engine) == before
+    _no_leak(output)
+
+
+def test_a_target_that_appears_before_the_moves_stops_the_unit(engine: Engine) -> None:
+    _draft(engine)
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG, script=_bootstrap(engine, "appear-before-apply"))
+    assert rc == 1 and _codes(payload) == ["target_changed"], output
+    assert payload["errors"][0]["path"] == POST
+    after = _tree(engine)
+    assert after.pop(POST) == b"made by hand\n"
+    assert after == before
+
+
+def test_reference_definitions_and_angle_destinations_are_rewritten(engine: Engine) -> None:
+    _draft(engine, body="\n[diagram]: images/diagram.png\n![logo](<logo.svg>)\n[site]: https://example.com/b\n")
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 0, output
+    body = (engine.blog / POST).read_text(encoding="utf-8").split("---\n", 2)[2]
+    assert body == (
+        "\n[diagram]: ../../assets/posts/first-post/diagram.png\n"
+        "![logo](../../assets/posts/first-post/logo.svg)\n"
+        "[site]: https://example.com/b\n"
+    )
