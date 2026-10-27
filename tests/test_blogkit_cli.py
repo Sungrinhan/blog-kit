@@ -907,3 +907,244 @@ def test_a_failed_move_while_reconverting_restores_the_old_copy(engine: Engine, 
     assert rc == 1 and _codes(payload) == ["apply_failed"], output
     assert payload["rolled_back"] is True
     assert _tree(engine) == before
+
+
+# ------------------------------------------------------------------ convert: recovery after an interrupted unit
+
+CRASH = '''\
+"""Test bootstrap: run the installed CLI and kill the process at one file operation."""
+import os
+import runpy
+import shutil
+import sys
+
+cli, mode, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
+seen = {"replace": 0, "rmtree": 0}
+real = {"replace": os.replace, "rmtree": shutil.rmtree}
+
+
+def wrap(name):
+    def call(*args, **kwargs):
+        seen[name] += 1
+        if mode == f"before-{name}" and seen[name] == count:
+            os._exit(9)
+        result = real[name](*args, **kwargs)
+        if mode == f"after-{name}" and seen[name] == count:
+            os._exit(9)
+        return result
+    return call
+
+
+os.replace = wrap("replace")
+shutil.rmtree = wrap("rmtree")
+sys.argv = [cli, *sys.argv[4:]]
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
+def _crash(engine: Engine, mode: str, count: int) -> Path:
+    script = engine.tmp / "crash.py"
+    script.write_text(CRASH)
+    wrapper = engine.tmp / f"run-crash-{mode}-{count}.py"
+    wrapper.write_text(
+        "import runpy, sys\n"
+        f"sys.argv = [{str(script)!r}, {str(engine.cli)!r}, {mode!r}, '{count}', *sys.argv[1:]]\n"
+        f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    return wrapper
+
+
+def _changed_draft(engine: Engine) -> None:
+    draft = engine.blog / "inbox" / SLUG / "draft"
+    (draft / "images" / "diagram.png").write_bytes(PNG_V2)
+    (draft / "chart.png").write_bytes(PNG)
+    (draft / f"{SLUG}.md").write_text(FRONTMATTER + "\nNew body ![d](images/diagram.png) ![c](chart.png)\n",
+                                      encoding="utf-8")
+
+
+DRAFT = f"inbox/{SLUG}/draft/{SLUG}.md"
+
+
+def _break_draft(engine: Engine) -> None:
+    """Make the conversion after recovery fail, so the recovered tree stays visible."""
+    draft = engine.blog / DRAFT
+    draft.write_text(draft.read_text(encoding="utf-8").replace('lang: "ko"\n', 'lang: "ko"\nsummary: "x"\n'),
+                     encoding="utf-8")
+
+
+def _without_draft(tree: dict[str, bytes]) -> dict[str, bytes]:
+    return {k: v for k, v in tree.items() if k != DRAFT}
+
+
+def test_an_interrupted_reconvert_is_rolled_back_by_the_next_convert(engine: Engine) -> None:
+    _converted(engine)
+    _changed_draft(engine)
+    before = _tree(engine)
+    rc, _, output = engine.run("convert", SLUG, script=_crash(engine, "after-replace", 3))
+    assert rc == 9, output
+    assert _tree(engine) != before
+    _break_draft(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == ["draft_key_not_allowed"], output
+    assert _without_draft(_tree(engine)) == _without_draft(before)
+
+
+def _reconverted_reference(tmp_path: Path) -> dict[str, bytes]:
+    """What a finished reconvert leaves, built in a separate world (draft excluded)."""
+    folder = tmp_path / "reference"
+    folder.mkdir()
+    reference = Engine(folder)
+    _converted(reference)
+    _changed_draft(reference)
+    rc, _, output = reference.run("convert", SLUG)
+    assert rc == 0, output
+    return _without_draft(_tree(reference))
+
+
+# A reconvert of _changed_draft moves 8 files after the journal is written
+# (os.replace 1); os.replace 10 writes the applied mark.
+@pytest.mark.parametrize("mode,count", [("before-replace", 1), ("before-replace", 2),
+                                        *(("after-replace", n) for n in range(1, 10))])
+def test_a_reconvert_stopped_before_the_applied_mark_is_undone(engine: Engine, mode: str, count: int) -> None:
+    _converted(engine)
+    _changed_draft(engine)
+    before = _tree(engine)
+    rc, _, output = engine.run("convert", SLUG, script=_crash(engine, mode, count))
+    assert rc == 9, output
+    _break_draft(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == ["draft_key_not_allowed"], output
+    assert _without_draft(_tree(engine)) == _without_draft(before)
+
+
+@pytest.mark.parametrize("mode,count", [("after-replace", 10), ("after-rmtree", 1), ("after-rmtree", 2)])
+def test_a_reconvert_stopped_after_the_applied_mark_keeps_the_new_copy(
+        engine: Engine, tmp_path: Path, mode: str, count: int) -> None:
+    _converted(engine)
+    _changed_draft(engine)
+    rc, _, output = engine.run("convert", SLUG, script=_crash(engine, mode, count))
+    assert rc == 9, output
+    _break_draft(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == ["draft_key_not_allowed"], output
+    assert _without_draft(_tree(engine)) == _reconverted_reference(tmp_path)
+
+
+# A first conversion moves 4 files (os.replace 2 to 5); os.replace 6 writes the applied mark.
+@pytest.mark.parametrize("count", [1, 2, 3, 4, 5])
+def test_a_first_conversion_stopped_midway_is_undone(engine: Engine, count: int) -> None:
+    _draft(engine)
+    before = _tree(engine)
+    rc, _, output = engine.run("convert", SLUG, script=_crash(engine, "after-replace", count))
+    assert rc == 9, output
+    _break_draft(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == ["draft_key_not_allowed"], output
+    assert _without_draft(_tree(engine)) == _without_draft(before)
+
+
+def test_recovery_reports_what_it_did(engine: Engine) -> None:
+    _draft(engine)
+    rc, _, output = engine.run("convert", SLUG, script=_crash(engine, "after-replace", 3))
+    assert rc == 9, output
+    rc, payload, output = engine.run("convert", SLUG)
+    assert (rc, payload["errors"], payload["recovered"]) == (0, [], "rolled_back"), output
+    assert (engine.blog / POST).read_text(encoding="utf-8") == EXPECTED_POST
+
+
+@pytest.mark.parametrize("second", [1, 2, 3])
+def test_a_rollback_stopped_again_is_finished_later(engine: Engine, second: int) -> None:
+    _converted(engine)
+    _changed_draft(engine)
+    before = _tree(engine)
+    rc, _, output = engine.run("convert", SLUG, script=_crash(engine, "after-replace", 7))
+    assert rc == 9, output
+    rc, _, output = engine.run("convert", SLUG, script=_crash(engine, "after-replace", second))
+    assert rc == 9, output
+    _break_draft(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == ["draft_key_not_allowed"], output
+    assert _without_draft(_tree(engine)) == _without_draft(before)
+
+
+def _stopped_reconvert(engine: Engine, count: int) -> None:
+    _converted(engine)
+    _changed_draft(engine)
+    rc, _, output = engine.run("convert", SLUG, script=_crash(engine, "after-replace", count))
+    assert rc == 9, output
+
+
+LOCK = f"inbox/{SLUG}/blogkit.lock"
+
+
+def _unlocked(tree: dict[str, bytes]) -> dict[str, bytes]:
+    """The tree without the lock a killed run leaves (the next command clears it)."""
+    return {k: v for k, v in tree.items() if k != LOCK}
+
+
+def _lose_first_backup(e: Engine) -> None:
+    """Lose the earliest backup while a later target still has its own, so a partial undo would show."""
+    backups = sorted((e.blog / "inbox" / SLUG / ".convert-backup").iterdir(), key=lambda p: int(p.name))
+    assert len(backups) == 2
+    backups[0].unlink()
+
+
+def _unknown_new_target(e: Engine) -> None:
+    (e.blog / ASSETS / "chart.png").write_bytes(b"unknown bytes\n")
+
+
+def _unknown_post(e: Engine) -> None:
+    (e.blog / POST).write_text("made by hand\n")
+
+
+def _unknown_backup(e: Engine) -> None:
+    folder = e.blog / "inbox" / SLUG / ".convert-backup"
+    for index in range(10):
+        if not (folder / str(index)).exists():
+            (folder / str(index)).write_bytes(b"unknown bytes\n")
+
+
+def _unknown_staged(e: Engine) -> None:
+    for staged in (e.blog / "inbox" / SLUG / ".convert-stage").iterdir():
+        staged.write_bytes(b"unknown bytes\n")
+
+
+def _tampered_journal(e: Engine) -> None:
+    journal = e.blog / "inbox" / SLUG / "convert-journal.json"
+    data = json.loads(journal.read_text(encoding="utf-8"))
+    data["targets"][0]["path"] = "README.md"
+    journal.write_text(json.dumps(data), encoding="utf-8")
+
+
+# After os.replace 3 the new chart is in place and the old diagram is in its backup;
+# after os.replace 5 the old post is in its backup too.
+@pytest.mark.parametrize("count,change,code", [
+    (5, _lose_first_backup, "convert_recovery_blocked"),
+    (3, _unknown_new_target, "convert_recovery_blocked"),
+    (3, _unknown_post, "convert_recovery_blocked"),
+    (3, _unknown_backup, "convert_recovery_blocked"),
+    (3, _unknown_staged, "convert_recovery_blocked"),
+    (3, _tampered_journal, "journal_invalid"),
+], ids=["lost backup", "unknown new target", "unknown post", "unknown backup", "unknown staged", "tampered journal"])
+def test_recovery_that_cannot_be_judged_changes_nothing(engine: Engine, count: int, change, code: str) -> None:
+    _stopped_reconvert(engine, count)
+    change(engine)
+    (engine.blog / "README.md").write_text("fake readme\n")
+    before = _tree(engine)
+    rc, payload, output = engine.run("convert", SLUG)
+    assert rc == 1 and _codes(payload) == [code], output
+    assert payload["errors"][0]["path"] == f"inbox/{SLUG}/convert-journal.json"
+    assert _tree(engine) == _unlocked(before)
+    _no_leak(output)
+
+
+@pytest.mark.parametrize("command", [
+    ["check", SLUG], ["status", SLUG], ["publish", SLUG],
+    ["approve", SLUG, "--hash", "0" * 64, "--warnings", "0" * 64],
+], ids=["check", "status", "publish", "approve"])
+def test_other_commands_refuse_an_interrupted_slug(engine: Engine, command: list[str]) -> None:
+    _stopped_reconvert(engine, 5)
+    before = _tree(engine)
+    rc, payload, output = engine.run(*command)
+    assert rc == 1 and _codes(payload) == ["convert_interrupted"], output
+    assert _unlocked(_tree(engine)) == _unlocked(before)

@@ -38,6 +38,13 @@ them. The changed post, assets and evidence go in as one unit: staged under
 inbox/<slug>/, a journal, a re-check that the targets are as they were at
 the start, a backup and one rename per target, an applied mark, then
 cleanup. A handled error while moving rolls the unit back on the spot.
+When a run stops midway, the stage, backup or journal stays behind: every
+other command for that slug is refused, and the next convert first judges
+the files actually at each target, backup and stage path against the
+journal's digests. Before the applied mark it undoes every target (each step
+can run again); after it the new copy stays and only cleanup is left. A lost
+original, a file the journal does not know or a journal naming any path
+convert would not use stops it with nothing changed.
 
 Output holds fixed error codes, check ids and reasons, versions,
 repo-relative paths and line numbers only. It never prints post text, external command output
@@ -100,6 +107,8 @@ STAGE_DIR = ".convert-stage"
 BACKUP_DIR = ".convert-backup"
 JOURNAL_NAME = "convert-journal.json"
 MAX_FOLDER_ENTRIES = 1000
+MAX_JOURNAL_BYTES = 1024 * 1024
+JOURNAL_TARGET_KEYS = frozenset({"path", "existed", "original_digest", "new_digest", "staged", "backup"})
 
 
 class CliError(Exception):
@@ -669,9 +678,12 @@ def _roll_back(blog: Path, journal: dict, cap: int) -> bool:
     digests = [_file_digest(blog / target["path"], cap) for target in targets]
     for digest, target in zip(digests, targets):
         original, new = target["original_digest"], target["new_digest"]
-        if digest not in (None, original, new):
+        backup = _file_digest(blog / target["backup"], cap)
+        if digest not in (None, original, new) or backup not in (None, original):
             return False
-        if target["existed"] and digest != original and _file_digest(blog / target["backup"], cap) != original:
+        if _file_digest(blog / target["staged"], cap) not in (None, new):
+            return False
+        if target["existed"] and digest != original and backup != original:
             return False
     try:
         for digest, target in zip(reversed(digests), reversed(targets)):
@@ -754,6 +766,91 @@ def apply_unit(blog: Path, inbox: str, changes: dict[str, bytes | None], before:
         _discard(blog, inbox)
     except OSError:
         raise CliError("cleanup_failed", f"{inbox}/{JOURNAL_NAME}") from None
+
+
+def _leftovers(inbox: str) -> list[str]:
+    return [f"{inbox}/{STAGE_DIR}", f"{inbox}/{BACKUP_DIR}", f"{inbox}/{JOURNAL_NAME}.tmp", f"{inbox}/{JOURNAL_NAME}"]
+
+
+def interrupted(blog: Path, inbox: str) -> bool:
+    """Whether a convert unit was left behind (stage, backup or journal)."""
+    for relative in _leftovers(inbox):
+        refuse_symlinks(blog, relative)
+    return any(os.path.lexists(blog / relative) for relative in _leftovers(inbox))
+
+
+def _ancestors(relative: str) -> set[str]:
+    parts = Path(relative).parts
+    return {"/".join(parts[:depth]) for depth in range(1, len(parts))}
+
+
+def _read_journal(blog: Path, verifier, slug: str) -> dict:
+    """The journal of an interrupted unit, refused unless every path is one convert itself would use."""
+    inbox = f"{verifier.INBOX_DIR}/{slug}"
+    relative = f"{inbox}/{JOURNAL_NAME}"
+    try:
+        journal = json.loads(_read(verifier, blog, relative, MAX_JOURNAL_BYTES).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise CliError("journal_invalid", relative) from None
+    assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
+    fixed = {verifier.post_path_for(slug), f"{inbox}/{verifier.EVIDENCE_NAME}"}
+    folders = set().union(*map(_ancestors, (*fixed, f"{assets_dir}/x")))
+
+    def target_ok(index: int, target) -> bool:
+        if not isinstance(target, dict) or set(target) != JOURNAL_TARGET_KEYS:
+            return False
+        name = target["path"].removeprefix(f"{assets_dir}/") if isinstance(target["path"], str) else None
+        return (
+            (target["path"] in fixed or (name != target["path"] and bool(verifier.ASSET_NAME_RE.fullmatch(name))))
+            and isinstance(target["existed"], bool)
+            and all(digest is None or (isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest))
+                    for digest in (target["original_digest"], target["new_digest"]))
+            and target["existed"] == (target["original_digest"] is not None)
+            and target["staged"] == f"{inbox}/{STAGE_DIR}/{index}"
+            and target["backup"] == f"{inbox}/{BACKUP_DIR}/{index}"
+        )
+
+    if not (
+        isinstance(journal, dict) and set(journal) == {"journal", "applied", "created_dirs", "targets"}
+        and journal["journal"] == 1 and isinstance(journal["applied"], bool)
+        and isinstance(journal["created_dirs"], list) and all(folder in folders for folder in journal["created_dirs"])
+        and isinstance(journal["targets"], list)
+        and all(target_ok(index, target) for index, target in enumerate(journal["targets"]))
+        and len({target["path"] for target in journal["targets"]}) == len(journal["targets"])
+    ):
+        raise CliError("journal_invalid", relative)
+    for target in journal["targets"]:
+        for key in ("path", "staged", "backup"):
+            refuse_symlinks(blog, target[key])
+    return journal
+
+
+def recover(blog: Path, slug: str, verifier) -> str | None:
+    """Finish an interrupted convert unit by the files that are there.
+
+    Before the applied mark every target goes back to its original state;
+    after it the new state stays and only cleanup is left. A lost original or
+    a file the journal does not know stops recovery with nothing changed.
+    """
+    inbox = f"{verifier.INBOX_DIR}/{slug}"
+    if not interrupted(blog, inbox):
+        return None
+    blocked = CliError("convert_recovery_blocked", f"{inbox}/{JOURNAL_NAME}")
+    if not os.path.lexists(blog / inbox / JOURNAL_NAME):
+        # Stopped before the journal was in place: no target was moved yet.
+        backup = blog / inbox / BACKUP_DIR
+        if os.path.lexists(backup) and (not backup.is_dir() or any(backup.iterdir())):
+            raise blocked
+        _discard(blog, inbox)
+        return "discarded"
+    journal = _read_journal(blog, verifier, slug)
+    if journal["applied"]:
+        _discard(blog, inbox)
+        return "cleaned_up"
+    if not _roll_back(blog, journal, verifier.MAX_ASSET_BYTES):
+        raise blocked
+    _discard(blog, inbox)
+    return "rolled_back"
 
 
 def convert(blog: Path, slug: str, verifier, render) -> dict:
@@ -881,8 +978,13 @@ def run(args: argparse.Namespace, blog: Path) -> dict:
 
 
 def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
+    inbox = f"{verifier.INBOX_DIR}/{args.slug}"
     if args.command == "convert":
-        return convert(blog, args.slug, verifier, _load("blog_render", RENDER_PATH))
+        recovered = recover(blog, args.slug, verifier)
+        result = convert(blog, args.slug, verifier, _load("blog_render", RENDER_PATH))
+        return {**result, "recovered": recovered} if recovered else result
+    if interrupted(blog, inbox):
+        raise CliError("convert_interrupted", f"{inbox}/{JOURNAL_NAME}")
     raise CliError("not_implemented")
 
 
