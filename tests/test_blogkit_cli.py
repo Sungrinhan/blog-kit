@@ -30,6 +30,8 @@ ENGINE_FILES = (
     "scripts/doctor.py",
     "scripts/blog_render.py",
     "scripts/confidential_check.py",
+    "scripts/blog_preflight.py",
+    "adapters/astro/blogkit_links.py",
     ".claude-plugin/plugin.json",
 )
 PLUGIN_ID = "claude-blog@blog-kit"
@@ -40,6 +42,55 @@ COMMIT = "c" * 40
 PLANTED = "sk-" + "Q" * 30
 PLANTED_URL = "https://leak.example.test/private-path"
 REAL_GIT = shutil.which("git")
+PREVIEW_DIR = ".blogkit-preview"
+# What the stub `astro build` writes into its --outDir unless a test changes it.
+DEFAULT_PREVIEW = {
+    "index.html": "<html><body><a href=\"/posts/\">posts</a></body></html>",
+    "posts/first-post/index.html": (
+        "<html><body><article><h1 id=\"heading\">Heading</h1>"
+        "<img src=\"/_astro/diagram.abc123.png\" alt=\"Diagram\">"
+        "<img src=\"/_astro/logo.def456.svg\" alt=\"logo\"></article></body></html>"),
+    "_astro/diagram.abc123.png": "png",
+    "_astro/logo.def456.svg": "<svg></svg>",
+    "posts/other/index.html": "<html><body><h1 id=\"top\">Other</h1></body></html>",
+    "about/index.html": "<html><body>About</body></html>",
+}
+# Test bootstrap: fake DNS and HTTP for every CLI run, so no test reaches the network.
+NETFAKE = '''\
+import io, json, runpy, socket, sys, urllib.error, urllib.request
+from email.message import Message
+
+cli, table_path, calls_path = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(table_path, encoding="utf-8") as handle:
+    table = json.load(handle)
+
+
+def getaddrinfo(host, port, *args, **kwargs):
+    address = table["hosts"].get(host, "93.184.216.34")
+    if address is None:
+        raise socket.gaierror(socket.EAI_NONAME, "unknown host")
+    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))]
+
+
+def fake_open(self, request, data=None, timeout=None):
+    url = request.full_url
+    with open(calls_path, "a", encoding="utf-8") as handle:
+        handle.write(request.get_method() + " " + url + "\\n")
+    answer = table["answers"].get(url, 200)
+    if answer == "timeout":
+        raise urllib.error.URLError(socket.timeout("timed out"))
+    if answer >= 300:
+        raise urllib.error.HTTPError(url, answer, "scripted", Message(), io.BytesIO(b""))
+    response = io.BytesIO(b"x")
+    response.status, response.headers = answer, Message()
+    return response
+
+
+socket.getaddrinfo = getaddrinfo
+urllib.request.OpenerDirector.open = fake_open
+sys.argv = [cli, *sys.argv[4:]]
+runpy.run_path(cli, run_name="__main__")
+'''
 
 
 class Engine:
@@ -87,6 +138,9 @@ class Engine:
         self.astro_touch: tuple[str, str] | None = None
         self.isolated_path = False
         self.tools = ["node", "npx"]
+        self.build_exit = 0
+        self.preview = dict(DEFAULT_PREVIEW)
+        self.net = {"hosts": {}, "answers": {}}
 
     def _stubs(self) -> None:
         out = self.tmp / "claude-out.json"
@@ -125,22 +179,48 @@ class Engine:
             node = self.bin / "node"
             node.write_text("#!/bin/sh\necho v24.0.0\n")
             node.chmod(0o755)
+        source = self.tmp / "preview-src"
+        if source.exists():
+            shutil.rmtree(source)
+        for relative, text in self.preview.items():
+            (source / relative).parent.mkdir(parents=True, exist_ok=True)
+            (source / relative).write_text(text, encoding="utf-8")
+        source.mkdir(exist_ok=True)
         if "npx" in self.tools:
             npx = self.bin / "npx"
             npx.write_text(
                 "#!/bin/sh\n"
-                f'echo "$*" >> "{calls}"\n'
+                f'echo "$* drafts=$BLOGKIT_INCLUDE_DRAFTS" >> "{calls}"\n'
                 f'echo "stdout {PLANTED} {PLANTED_URL}"\n'
                 f'echo "src/content/posts/first-post.md:2: fake diagnostic {PLANTED}" >&2\n'
                 + touch +
-                f"exit {self.astro_exit}\n"
+                'case "$2 $3" in\n'
+                f'  "astro check") exit {self.astro_exit};;\n'
+                '  "astro build")\n'
+                '    out=""; prev=""\n'
+                '    for arg in "$@"; do [ "$prev" = "--outDir" ] && out="$arg"; prev="$arg"; done\n'
+                f'    mkdir -p "$out" && cp -R "{source}/." "$out/"\n'
+                f'    exit {self.build_exit};;\n'
+                "esac\n"
+                "exit 0\n"
             )
             npx.chmod(0o755)
         if self.isolated_path:
             sysbin = self.tmp / "sysbin"
             sysbin.mkdir(exist_ok=True)
-            if not (sysbin / "cat").exists():
-                (sysbin / "cat").symlink_to(shutil.which("cat"))
+            for tool in ("cat", "mkdir", "cp"):
+                if not (sysbin / tool).exists():
+                    (sysbin / tool).symlink_to(shutil.which(tool))
+        (self.tmp / "net.json").write_text(json.dumps(self.net))
+        netfake = self.tmp / "netfake.py"
+        netfake.write_text(NETFAKE)
+        wrapper = self.tmp / "run-netfake.py"
+        wrapper.write_text(
+            "import runpy, sys\n"
+            f"sys.argv = [{str(netfake)!r}, {str(self.cli)!r}, {str(self.tmp / 'net.json')!r}, "
+            f"{str(self.tmp / 'net-calls.txt')!r}, *sys.argv[1:]]\n"
+            f"runpy.run_path({str(netfake)!r}, run_name='__main__')\n"
+        )
 
     def run(self, *args: str, script: Path | None = None) -> tuple[int, dict, str]:
         (self.blog / ".claude" / "settings.json").write_text(json.dumps(self.shared))
@@ -150,7 +230,7 @@ class Engine:
         rest = str(self.tmp / "sysbin") if self.isolated_path else env.get("PATH", "")
         env.update(HOME=str(self.home), PATH=f"{self.bin}{os.pathsep}{rest}", **self.env)
         result = subprocess.run(
-            [sys.executable, str(script or self.cli), *args, "--blog-repo", str(self.blog)],
+            [sys.executable, str(script or self.tmp / "run-netfake.py"), *args, "--blog-repo", str(self.blog)],
             capture_output=True, text=True, env=env, cwd=self.tmp, timeout=120,
         )
         try:
@@ -1197,6 +1277,7 @@ def _terms_file(engine: Engine, text: str = f"# fake\n{FAKE_TERM}\n") -> None:
 
 
 def _checkable(engine: Engine) -> None:
+    (engine.blog / ".gitignore").write_text(f"{PREVIEW_DIR}/\n")
     _draft(engine)
     rc, _, output = engine.run("convert", SLUG)
     assert rc == 0, output
@@ -1246,34 +1327,46 @@ def test_status_after_convert_lists_every_missing_record(engine: Engine) -> None
     assert not (engine.blog / "inbox" / SLUG / "blogkit.lock").exists()
 
 
-def test_check_records_gates_1_to_4_and_needs_a_review(engine: Engine) -> None:
+# The fixture post's mailto link is an email address on this line, so gate 5 warns there.
+EMAIL_LINE = EXPECTED_POST.split("\n").index(next(l for l in EXPECTED_POST.split("\n") if "mailto:" in l)) + 1
+EMAIL_WARNING = f"5:email:{POST}:{EMAIL_LINE}"
+
+
+def test_check_records_gates_1_to_6_and_needs_a_review(engine: Engine) -> None:
     _checkable(engine)
     rc, payload, output = engine.run("check", SLUG)
     assert rc == 1 and _codes(payload) == ["gates_failed"], output
     gates = _gates(payload)
-    assert sorted(gates) == [1, 2, 3, 4]
-    assert [gates[n]["passed"] for n in (1, 2, 3, 4)] == [True, True, True, False]
+    assert sorted(gates) == [1, 2, 3, 4, 5, 6]
+    assert [gates[n]["passed"] for n in range(1, 7)] == [True, True, True, False, True, True]
     assert _gate_codes(payload, 4) == ["review_missing"]
     current = _verifier().content_hash(engine.blog, SLUG)
     records = {r["gate"]: r for r in _evidence(engine)["records"] if r["kind"] == "gate"}
     assert {n: (r["passed"], r["warnings"], r["content_hash"], r["engine_version"]) for n, r in records.items()} == {
         1: (True, [], current, VERSION), 2: (True, [], current, VERSION),
-        3: (True, [], current, VERSION), 4: (False, [], current, VERSION)}
+        3: (True, [], current, VERSION), 4: (False, [], current, VERSION),
+        5: (True, [EMAIL_WARNING], current, VERSION), 6: (True, [], current, VERSION)}
     _verifier().validate_evidence(_evidence(engine))
     _no_leak(output)
+    _no_leak((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+    assert "example.com" not in output
 
 
-def test_check_passes_gates_1_to_4_with_a_clean_review(engine: Engine) -> None:
+def test_check_passes_every_gate_with_a_clean_review(engine: Engine) -> None:
     _checkable(engine)
     _review(engine)
     rc, payload, output = engine.run("check", SLUG)
     assert (rc, payload["errors"]) == (0, []), output
-    assert [_gates(payload)[n]["passed"] for n in (1, 2, 3, 4)] == [True] * 4
-    assert (engine.tmp / "npx-calls.txt").read_text().splitlines() == ["--no-install astro check"]
+    assert [_gates(payload)[n]["passed"] for n in range(1, 7)] == [True] * 6
+    calls = (engine.tmp / "npx-calls.txt").read_text().splitlines()
+    # astro check runs without the draft preview variable; the preview build runs with it, into its own folder.
+    assert calls == ["--no-install astro check drafts=", f"--no-install astro build --outDir {PREVIEW_DIR} drafts=1"]
     rc, status, output = engine.run("status", SLUG)
     assert rc == 0, output
-    assert status["gates"] == {str(n): {"passed": True, "warnings": []} for n in (1, 2, 3, 4)}
-    assert status["missing"] == ["gate_5_missing", "gate_6_missing", "learning_missing", "approval_missing"]
+    assert status["gates"] == {str(n): {"passed": True, "warnings": [EMAIL_WARNING] if n == 5 else []}
+                               for n in range(1, 7)}
+    assert status["warnings"] == [EMAIL_WARNING]
+    assert status["missing"] == ["learning_missing", "approval_missing"]
 
 
 def test_a_review_with_p0_fails_gate_4(engine: Engine) -> None:
@@ -1433,7 +1526,7 @@ def test_a_hash_change_starts_the_records_afresh_and_keeps_public_copy(engine: E
     evidence = _evidence(engine)
     current = _verifier().content_hash(engine.blog, SLUG)
     assert evidence["content_hash"] == current and evidence["public_copy"] == kept
-    assert sorted(r["gate"] for r in evidence["records"]) == [1, 2, 3, 4]
+    assert sorted(r["gate"] for r in evidence["records"]) == [1, 2, 3, 4, 5, 6]
     assert all(r["content_hash"] == current for r in evidence["records"])
 
 
@@ -1447,3 +1540,165 @@ def test_a_review_for_another_hash_does_not_count(engine: Engine) -> None:
     _write_evidence(engine, evidence)
     rc, payload, output = engine.run("check", SLUG)
     assert rc == 1 and _gate_codes(payload, 4) == ["review_missing"], output
+
+
+# ------------------------------------------------------------------ check: gates 5 and 6
+
+
+def test_a_confidential_term_fails_gate_5_with_file_and_line_only(engine: Engine) -> None:
+    _checkable(engine)
+    _append_post(engine, f"\n이 줄에 {FAKE_TERM}가 있다\n")
+    (engine.blog / ASSETS / "logo.svg").write_text(f"<svg>\n<text>{FAKE_TERM}</text>\n</svg>\n", encoding="utf-8")
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1, output
+    assert _gates(payload)[5]["errors"] == [
+        {"code": "confidential_term", "path": POST, "line": POST_LINES + 2},
+        {"code": "confidential_term", "path": f"{ASSETS}/logo.svg", "line": 2},
+    ]
+    assert FAKE_TERM not in output and FAKE_TERM not in (engine.blog / EVIDENCE).read_text(encoding="utf-8")
+
+
+def test_heuristics_pass_gate_5_as_warning_ids_in_the_digest(engine: Engine) -> None:
+    _checkable(engine)
+    _append_post(engine, "\n서버 10.1.2.3 에서 30% 줄였다\n")
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    line = POST_LINES + 2
+    expected = [EMAIL_WARNING, f"5:number_unit:{POST}:{line}", f"5:private_ip:{POST}:{line}"]
+    gate = _gates(payload)[5]
+    assert (gate["passed"], gate["errors"], gate["warnings"]) == (True, [], expected), output
+    rc, status, output = engine.run("status", SLUG)
+    assert status["warnings"] == expected
+    assert status["warnings_digest"] == _verifier().warnings_digest(expected)
+    assert "10.1.2.3" not in output
+
+
+def test_an_unusable_term_list_fails_gate_5_too(engine: Engine) -> None:
+    _checkable(engine)
+    _review(engine)
+    (engine.home / ".config" / "blog-kit" / "confidential.txt").unlink()
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 5) == ["confidential_list_missing"], output
+
+
+def _line_of(text: str) -> int:
+    return next(i for i, line in enumerate(EXPECTED_POST.split("\n"), 1) if text in line)
+
+
+def _url_digest(url: str) -> str:
+    return _sha(url.encode("utf-8"))[:16]
+
+
+def _gate_6(engine: Engine) -> dict:
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert "example.com" not in output and PLANTED not in output, output
+    return _gates(payload)[6]
+
+
+def _without(page: str):
+    def change(e: Engine) -> None:
+        del e.preview[page]
+    return change
+
+
+def _page(page: str, html: str):
+    def change(e: Engine) -> None:
+        e.preview[page] = html
+    return change
+
+
+GATE_6_BLOCKS = [
+    ("post page missing", _without("posts/first-post/index.html"),
+     [{"code": "preview_page_missing", "path": POST}]),
+    ("broken internal link", _without("about/index.html"),
+     [{"code": "internal_link_broken", "path": POST, "line": _line_of("(/about/)")}]),
+    ("broken anchor", _page("posts/first-post/index.html", "<html><body><h1>no id</h1></body></html>"),
+     [{"code": "anchor_broken", "path": POST, "line": _line_of("(#heading)")}]),
+    ("missing local image", _page("posts/first-post/index.html",
+                                  '<html><body><h1 id="heading">H</h1><img src="/_astro/gone.png"></body></html>'),
+     [{"code": "image_missing", "path": POST}]),
+]
+
+
+@pytest.mark.parametrize("change,errors", [case[1:] for case in GATE_6_BLOCKS], ids=[case[0] for case in GATE_6_BLOCKS])
+def test_preview_problems_fail_gate_6(engine: Engine, change, errors: list[dict]) -> None:
+    _checkable(engine)
+    change(engine)
+    gate = _gate_6(engine)
+    assert (gate["passed"], gate["errors"]) == (False, errors)
+
+
+def test_internal_links_with_anchors_resolve_in_the_preview(engine: Engine) -> None:
+    _checkable(engine)
+    _append_post(engine, "\n[ok](/posts/other/#top) and [bad](/posts/other/#nope) and [also](/posts/other)\n")
+    gate = _gate_6(engine)
+    assert gate["errors"] == [{"code": "anchor_broken", "path": POST, "line": POST_LINES + 2}]
+
+
+EXTERNAL_LINK = "https://example.com/a"
+EXTERNAL_IMAGE = "https://example.com/remote.png"
+
+
+@pytest.mark.parametrize("net,code,url,text", [
+    ({"answers": {EXTERNAL_IMAGE: 404}}, "link_permanent", EXTERNAL_IMAGE, "(https://example.com/remote.png)"),
+    ({"hosts": {"example.com": "10.0.0.1"}}, "link_policy", EXTERNAL_LINK, "(https://example.com/a)"),
+], ids=["external image 404", "private address"])
+def test_a_blocked_external_url_fails_gate_6_by_digest(engine: Engine, net: dict, code: str, url: str,
+                                                        text: str) -> None:
+    _checkable(engine)
+    engine.net.update(hosts=net.get("hosts", {}), answers=net.get("answers", {}))
+    gate = _gate_6(engine)
+    assert {"code": code, "path": POST, "line": _line_of(text), "url": _url_digest(url)} in gate["errors"]
+    assert gate["passed"] is False
+
+
+def test_a_transient_external_failure_is_a_gate_6_warning(engine: Engine) -> None:
+    _checkable(engine)
+    engine.net["answers"] = {EXTERNAL_LINK: 503}
+    gate = _gate_6(engine)
+    line = _line_of("(https://example.com/a)")
+    assert (gate["passed"], gate["errors"]) == (True, [])
+    assert gate["warnings"] == [f"6:link_transient:{POST}:{line}:{_url_digest(EXTERNAL_LINK)}"]
+    calls = (engine.tmp / "net-calls.txt").read_text().splitlines()
+    assert calls.count(f"HEAD {EXTERNAL_LINK}") == 3
+    assert not any("mailto" in call for call in calls)
+
+
+def test_a_listed_403_passes_gate_6(engine: Engine) -> None:
+    _checkable(engine)
+    engine.net["answers"] = {EXTERNAL_LINK: 403}
+    (engine.blog / "inbox" / SLUG / "draft" / "external-links.allowed").write_text(EXTERNAL_LINK + "\n")
+    gate = _gate_6(engine)
+    assert (gate["passed"], gate["errors"]) == (True, [])
+
+
+def _preview_symlink(e: Engine) -> None:
+    real = e.tmp / "elsewhere"
+    real.mkdir()
+    (e.blog / PREVIEW_DIR).symlink_to(real)
+
+
+@pytest.mark.parametrize("change,code", [
+    (lambda e: setattr(e, "build_exit", 1), "preview_build_failed"),
+    (lambda e: (e.blog / ".gitignore").unlink(), "preview_not_ignored"),
+    (_preview_symlink, "symlink_refused"),
+], ids=["build fails", "not ignored", "symlinked folder"])
+def test_a_preview_build_that_cannot_be_used_fails_gate_6(engine: Engine, change, code: str) -> None:
+    _checkable(engine)
+    change(engine)
+    gate = _gate_6(engine)
+    assert gate["passed"] is False and gate["errors"][0]["code"] == code
+
+
+def test_the_preview_build_replaces_an_old_preview_and_leaves_dist_alone(engine: Engine) -> None:
+    _checkable(engine)
+    (engine.blog / PREVIEW_DIR / "posts" / "stale").mkdir(parents=True)
+    (engine.blog / PREVIEW_DIR / "posts" / "stale" / "index.html").write_text("old")
+    (engine.blog / "dist").mkdir()
+    (engine.blog / "dist" / "index.html").write_text("deployed")
+    gate = _gate_6(engine)
+    assert gate["passed"] is True
+    assert not (engine.blog / PREVIEW_DIR / "posts" / "stale").exists()
+    assert (engine.blog / "dist" / "index.html").read_text() == "deployed"

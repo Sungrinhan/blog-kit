@@ -46,7 +46,7 @@ can run again); after it the new copy stays and only cleanup is left. A lost
 original, a file the journal does not know or a journal naming any path
 convert would not use stops it with nothing changed.
 
-check runs publish gates 1 to 4 and records each one in the evidence:
+check runs publish gates 1 to 6 and records each one in the evidence:
 1 tools (Python 3.11+, node and npx on PATH, the git root, the verifier copy,
 the term list through scripts/confidential_check.py), 2 body safety (raw HTML
 and inline SVG outside code and autolinks, and SVG asset files, against the
@@ -54,7 +54,16 @@ upstream renderer's allow-list of tags, attributes and href/src schemes;
 Markdown references by the convert rules; a file reference must be an image
 in the post's asset folder; violations are reported, never fixed), 3
 `npx --no-install astro check` by its exit code, 4 a review record for the
-current hash with no P0 (written by the M2c reviewer). The content hash is
+current hash with no P0 (written by the M2c reviewer), 5 the confidential
+check over the post and its asset files (a term blocks; heuristics become
+warning ids), 6 the draft preview build (`npx --no-install astro build
+--outDir .blogkit-preview` with BLOGKIT_INCLUDE_DRAFTS=1, into a folder the
+blog repo's .gitignore must list, emptied first) whose post page must exist,
+whose local images must resolve inside it, and against which the post's site
+links and anchors are resolved; the post's external URLs go through the link
+check module (adapters/astro/blogkit_links.py, with the draft folder's
+external-links.allowed), and a transient failure is a warning. A warning id
+is <gate>:<category>:<file>:<line>[:<URL digest>]. The content hash is
 fixed at the start and computed again before writing; a change in between
 records nothing. Evidence for another hash starts its records afresh and
 keeps public_copy. status shows the current and evidence hash, the gate
@@ -94,10 +103,14 @@ VERIFIER_PATH = INSTALL_ROOT / "adapters" / "astro" / "blogkit_verify.py"
 MANIFEST_PATH = INSTALL_ROOT / ".claude-plugin" / "plugin.json"
 RENDER_PATH = INSTALL_ROOT / "scripts" / "blog_render.py"
 CONFIDENTIAL_PATH = INSTALL_ROOT / "scripts" / "confidential_check.py"
+LINKS_PATH = INSTALL_ROOT / "adapters" / "astro" / "blogkit_links.py"
+# The draft preview build's own output folder; the blog repo's .gitignore must list it.
+PREVIEW_DIR = ".blogkit-preview"
 VERIFIER_COPY = "scripts/blogkit_verify.py"
 IDENTITY_TIMEOUT = 20.0
 COMMAND_TIMEOUT = 60.0
 ASTRO_CHECK_TIMEOUT = 600.0
+PREVIEW_TIMEOUT = 600.0
 MAX_LOCATIONS = 50
 # A path-shaped token followed by :<line> in external command output.
 LOCATION_RE = re.compile(r"(?P<path>[\w./@+-]*[\w@+-]\.[A-Za-z0-9]+):(?P<line>[0-9]+)")
@@ -200,7 +213,7 @@ def _locations(output: str, blog: Path) -> list[str]:
     return sorted(found)[:MAX_LOCATIONS]
 
 
-def run_quiet(command: list[str], blog: Path, timeout: float = COMMAND_TIMEOUT) -> dict:
+def run_quiet(command: list[str], blog: Path, timeout: float = COMMAND_TIMEOUT, extra_env: dict | None = None) -> dict:
     """Run an external command in the blog repo and keep only its exit code and repo locations.
 
     The command's own output never leaves this function: it may hold post
@@ -209,7 +222,7 @@ def run_quiet(command: list[str], blog: Path, timeout: float = COMMAND_TIMEOUT) 
     try:
         result = subprocess.run(
             command, cwd=blog, capture_output=True, text=True, errors="replace", timeout=timeout,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(extra_env or {})},
         )
     except FileNotFoundError:
         raise CliError("command_not_found") from None
@@ -1084,6 +1097,7 @@ class _HtmlCheck(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.render, self.on_file, self.svg_file = render, on_file, svg_file
         self.found: list[tuple[str, int]] = []
+        self.urls: list[tuple[str, int, bool]] = []
 
     def _report(self, code: str) -> None:
         self.found.append((code, self.getpos()[0]))
@@ -1102,6 +1116,7 @@ class _HtmlCheck(HTMLParser):
                 if not self.render._is_safe_url(value, media=name == "src"):
                     self._report("html_url_not_allowed")
                 else:
+                    self.urls.append((value.strip(), self.getpos()[0], name == "src"))
                     self.on_file(value.strip(), self.getpos()[0])
 
     handle_startendtag = handle_starttag
@@ -1127,6 +1142,20 @@ def _blank(text: str, ranges) -> str:
     return "".join(chars)
 
 
+def _post_parts(post: bytes) -> tuple[str, list, str]:
+    """The post body with its frontmatter turned into blank lines, its Markdown references, and the
+    same text with code, autolinks and reference destinations blanked (what is left of raw HTML).
+
+    Offsets and line numbers match the post file.
+    """
+    lines = post.decode("utf-8").split("\n")
+    close = lines.index("---", 1)
+    masked = "\n" * (close + 1) + "\n".join(lines[close + 1:])
+    references = _references(masked)
+    hidden = _code_ranges(masked) + [m.span() for m in AUTOLINK_RE.finditer(masked)] + [r[:2] for r in references]
+    return masked, references, _blank(masked, hidden)
+
+
 def gate_2(blog: Path, slug: str, verifier, render, post: bytes, assets: dict[str, bytes]) -> dict:
     """Body safety: raw HTML and inline SVG outside code, SVG asset files, link and image URLs.
 
@@ -1145,11 +1174,7 @@ def gate_2(blog: Path, slug: str, verifier, render, post: bytes, assets: dict[st
                 errors.append(_error("reference_not_in_assets", path, line))
         return check
 
-    text = post.decode("utf-8")
-    lines = text.split("\n")
-    close = lines.index("---", 1)
-    masked = "\n" * (close + 1) + "\n".join(lines[close + 1:])
-    references = _references(masked)
+    masked, references, blanked = _post_parts(post)
     in_post = file_reference(post_path, post_path)
     for start, _end, dest, image in references:
         line = masked.count("\n", 0, start) + 1
@@ -1160,8 +1185,7 @@ def gate_2(blog: Path, slug: str, verifier, render, post: bytes, assets: dict[st
             continue
         if url is not None:
             in_post(url, line)
-    hidden = _code_ranges(masked) + [m.span() for m in AUTOLINK_RE.finditer(masked)] + [r[:2] for r in references]
-    parsers = [(post_path, _blank(masked, hidden), _HtmlCheck(render, in_post))]
+    parsers = [(post_path, blanked, _HtmlCheck(render, in_post))]
     for path, data in assets.items():
         if path.endswith(".svg"):
             try:
@@ -1201,6 +1225,146 @@ def gate_4(evidence: dict, current: str) -> dict:
     return _gate(4, [] if reviews[0]["p0"] == 0 else [_error("review_has_p0")])
 
 
+def _warning_id(gate: int, category: str, path: str, line: int | None, url: str | None = None) -> str:
+    """<gate>:<category>:<file>:<line>[:<URL digest>], never the text that was found."""
+    return f"{gate}:{category}:{path}:{line if line is not None else ''}" + (f":{url}" if url else "")
+
+
+def gate_5(blog: Path, slug: str) -> dict:
+    """The confidential check over the post and its asset files: a term blocks, a heuristic warns."""
+    try:
+        confidential = _load("blogkit_confidential", CONFIDENTIAL_PATH)
+        result = confidential.scan_files(blog, confidential.slug_files(blog, slug))
+    except Exception:  # noqa: BLE001 - could not check; never print why
+        return _gate(5, [_error("confidential_check_failed")])
+    if result["list"] != "ok":
+        return _gate(5, [_error(f"confidential_{result['list']}")])
+    errors = [_error("confidential_term", b["file"], b["line"]) for b in result["blocks"]]
+    errors += [_error(f"confidential_{e['code']}", e["file"]) for e in result["errors"]]
+    warnings = [_warning_id(5, w["category"], w["file"], w["line"]) for w in result["warnings"]]
+    return _gate(5, errors, warnings)
+
+
+class _PageScan(HTMLParser):
+    """Element ids and img src values of one built page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ids: set[str] = set()
+        self.images: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        values = dict(attrs)
+        if values.get("id"):
+            self.ids.add(values["id"])
+        if tag == "img" and values.get("src"):
+            self.images.append(values["src"].strip())
+
+    handle_startendtag = handle_starttag
+
+
+def _built_file(out: Path, path: str) -> str | None:
+    """The preview file a site path names (directory index, the file itself, or <path>.html)."""
+    path = urllib.parse.unquote(path).lstrip("/")
+    if ".." in Path(path).parts:
+        return None
+    candidates = [f"{path}index.html"] if path == "" or path.endswith("/") else [path, f"{path}/index.html",
+                                                                                  f"{path}.html"]
+    for candidate in candidates:
+        try:
+            refuse_symlinks(out, candidate)
+        except CliError:
+            return None
+        if (out / candidate).is_file():
+            return candidate
+    return None
+
+
+def _page_scan(verifier, out: Path, relative: str) -> _PageScan:
+    scan = _PageScan()
+    scan.feed(verifier._read_capped(out, relative, verifier.MAX_PAGE_BYTES).decode("utf-8", "replace"))
+    scan.close()
+    return scan
+
+
+def gate_6(blog: Path, slug: str, verifier, render, post: bytes) -> dict:
+    """The draft preview build into its own git-ignored folder, then the post page, its local images,
+    the post's site links and anchors, and its external URLs through the link check module."""
+    post_path = verifier.post_path_for(slug)
+    try:
+        refuse_symlinks(blog, PREVIEW_DIR)
+        ignored = run_quiet([shutil.which("git") or "git", "check-ignore", "-q", f"{PREVIEW_DIR}/"], blog)
+        if ignored["exit_code"] != 0:
+            return _gate(6, [_error("preview_not_ignored", PREVIEW_DIR)])
+        if os.path.lexists(blog / PREVIEW_DIR):
+            if not (blog / PREVIEW_DIR).is_dir():
+                return _gate(6, [_error("preview_not_a_folder", PREVIEW_DIR)])
+            shutil.rmtree(blog / PREVIEW_DIR)
+        built = run_quiet([shutil.which("npx") or "npx", "--no-install", "astro", "build", "--outDir", PREVIEW_DIR],
+                          blog, timeout=PREVIEW_TIMEOUT, extra_env={verifier.PREVIEW_VAR: "1"})
+    except CliError as exc:
+        return _gate(6, [_error(exc.code, exc.path)])
+    if built["exit_code"] != 0:
+        errors = [_error("preview_build_failed")]
+        for location in built["locations"]:
+            path, _, line = location.rpartition(":")
+            errors.append(_error("preview_build_location", path, int(line)))
+        return _gate(6, errors)
+    out = blog / PREVIEW_DIR
+    page_path = f"posts/{slug}/index.html"
+    try:
+        page = _page_scan(verifier, out, page_path)
+    except verifier.VerifyError:
+        return _gate(6, [_error("preview_page_missing", post_path)])
+    errors: list[dict] = []
+    warnings: list[str] = []
+    for src in page.images:
+        target = urllib.parse.urljoin(f"/posts/{slug}/", src)
+        parts = urllib.parse.urlsplit(target)
+        if not parts.scheme and not parts.netloc and _built_file(out, parts.path) is None:
+            errors.append(_error("image_missing", post_path))
+    links = _load("blogkit_links", LINKS_PATH)
+    try:
+        allowed = links.load_exceptions(blog / verifier.INBOX_DIR / slug / "draft")
+    except links.LinkError as exc:
+        return _gate(6, [_error(exc.code, f"{verifier.INBOX_DIR}/{slug}/draft", exc.line)])
+    masked, references, blanked = _post_parts(post)
+    html = _HtmlCheck(render, lambda url, line: None)
+    html.feed(blanked)
+    html.close()
+    urls = [((dest[1:-1] if dest.startswith("<") else dest), masked.count("\n", 0, start) + 1)
+            for start, _end, dest, _image in references] + [(url, line) for url, line, _media in html.urls]
+    results: dict[str, dict] = {}
+    pages: dict[str, set[str] | None] = {}
+    for url, line in sorted(urls, key=lambda item: item[1]):
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:
+            continue  # gate 2 reports it
+        if parts.scheme in ("http", "https") or parts.netloc:
+            result = results.setdefault(url, links.check_url(url, allowed=allowed))
+            if result["result"] == "blocked":
+                errors.append({**_error(f"link_{result['kind']}", post_path, line), "url": result["url"]})
+            elif result["result"] == "warning":
+                warnings.append(_warning_id(6, "link_transient", post_path, line, result["url"]))
+        elif url.startswith("#"):
+            if urllib.parse.unquote(url[1:]) not in page.ids:
+                errors.append(_error("anchor_broken", post_path, line))
+        elif url.startswith("/"):
+            target = _built_file(out, parts.path)
+            if target is None:
+                errors.append(_error("internal_link_broken", post_path, line))
+            elif parts.fragment:
+                if target not in pages:
+                    try:
+                        pages[target] = _page_scan(verifier, out, target).ids
+                    except verifier.VerifyError:
+                        pages[target] = None
+                if pages[target] is None or urllib.parse.unquote(parts.fragment) not in pages[target]:
+                    errors.append(_error("anchor_broken", post_path, line))
+    return _gate(6, errors, warnings)
+
+
 def check(blog: Path, slug: str, verifier, render, doctor) -> dict:
     """Run gates 1 to 4 for the public copy and record them in its evidence.
 
@@ -1220,7 +1384,7 @@ def check(blog: Path, slug: str, verifier, render, doctor) -> dict:
     if evidence["content_hash"] != current:
         evidence.update(content_hash=current, engine_version=version, records=[])
     gates = [gate_1(blog, doctor), gate_2(blog, slug, verifier, render, post, assets), gate_3(blog),
-             gate_4(evidence, current)]
+             gate_4(evidence, current), gate_5(blog, slug), gate_6(blog, slug, verifier, render, post)]
     if _current_hash(blog, verifier, slug) != current:
         raise CliError("content_changed_during_check", post_path)
     numbers = {gate["gate"] for gate in gates}
