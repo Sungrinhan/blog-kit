@@ -52,7 +52,8 @@ claude-blog/
   scripts/sync_google_updates.py     # Google update ledger sync into the Blog Brain
   scripts/installer_ownership.py     # Shared Unix installer ownership engine
   scripts/doctor.py                  # blog-kit install doctor (fork)
-  # 23 scripts/*.py in total: `ls scripts/*.py | wc -l`
+  scripts/confidential_check.py      # Per-machine confidential-term check, no raw output (fork)
+  # 24 scripts/*.py in total: `ls scripts/*.py | wc -l`
   skills/                            # 33 skill directories (1 orchestrator + 31 sub-skills + blog-doctor)
     blog/SKILL.md                   # Main orchestrator, routing, scoring
       references/                   # 22 on-demand knowledge files (5 in v1.8.0, 1 in v1.9.0)

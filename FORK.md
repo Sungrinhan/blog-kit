@@ -24,6 +24,8 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `tests/test_blogkit_verify.py`: 임시 블로그 레포로 검증기 소스 모드의 통과·실패 사례, 증거 계약 위반, 자기 digest, 해시 직렬화(손으로 만든 예시와 골든 벡터) 확인
 - `tests/fixtures/blogkit/hash-vectors.json`: 내용 해시 골든 벡터. 한 번 생성해 고정한 값이라, 바뀌면 이미 발행한 글의 해시가 바뀐다는 뜻
 - `tests/test_adapters_release_scope.py`: 업스트림 릴리스 검사기가 보지 않는 `adapters/`에 같은 금지 문자열·설치 스크립트 링크 검사를 적용
+- `scripts/confidential_check.py`: 기밀 검사(stdlib). 금칙어 목록은 기기별 `~/.config/blog-kit/confidential.txt` 하나(경로 옵션·환경 변수 없음, symlink 거부, 일반 파일, 256KB, UTF-8 strict, `#` 줄·빈 줄 무시, 유효 항목 0개면 차단). `list`는 목록 상태만, `scan`은 파일 목록 또는 `--slug`(공개본 글과 자산 폴더, 경로·slug 규칙은 설치본 검증기에서)를 루트 안에서만(symlink 구성 요소 거부) 읽는다. md(1MB)·svg(10MB)는 NFC+casefold 부분 문자열 일치로 차단, 바이너리 이미지는 건너뛰고 목록만, 그 밖의 형식·읽기·디코딩 실패·예외는 검사 불능으로 차단. 휴리스틱(사설 IP·내부 호스트 접미사·이메일·이슈 키·로컬 경로·단위 붙은 숫자)은 경고만, 긴 줄에서도 선형 시간. 출력은 분류·파일·줄 번호뿐이고 금칙어·일치 원문·예외 메시지는 내지 않는다
+- `tests/test_confidential_check.py`: 임시 HOME의 가짜 금칙어로 목록 상태·일치·휴리스틱·검사 불능·slug와 파일 목록 동등·예외·긴 줄 시간 확인, 모든 출력에 가짜 금칙어·원문 없음
 - `docs/BLOG-KIT-UPGRADE.md`: 블로그 레포 설정 예시와 설치·업그레이드·다운그레이드 순서(재시작 뒤 `sync-verifier` → 사본 커밋 → 설치 점검), uninstall 금지, 런타임 경로 첫 전환, 보존 확인
 - `docs/BLOG-KIT-HUMAN-CHECK.md`: 두 기기 설치·전환 사람 검증 기록 양식과 단계별 기대 설치 점검 결과
 
@@ -32,7 +34,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 업스트림 파일을 직접 고친 곳. 업스트림 병합 때 충돌 후보다.
 
 - `.gitignore`: `/flow` 작업 폴더(`.scratch/`)와 외부 도구가 만드는 로컬 전용 Codex용 사본(`/AGENTS.md`, `/.agents/`) 제외
-- `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가. 스킬 폴더 수(33)·스크립트 수(23)와 구조도에 `blog-doctor`·`scripts/doctor.py`
+- `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가. 스킬 폴더 수(33)·스크립트 수(24)와 구조도에 `blog-doctor`·`scripts/doctor.py`·`scripts/confidential_check.py`
 - `.claude-plugin/marketplace.json`: 마켓 이름 `blog-kit`, owner를 포크 소유자로, `claude-blog` 설명의 스킬 폴더 수를 33개로. 기존 항목(동반 플러그인 포함)은 그대로
 - `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.N`, repository·homepage를 포크 저장소로, 설명의 스킬 폴더 수를 33개(`blog-doctor` 포함)로. 이름·author는 업스트림 그대로
 - `.github/ISSUE_TEMPLATE/config.yml`: 토론·보안 제보·문서 안내 URL을 포크 저장소로
