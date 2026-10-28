@@ -29,6 +29,9 @@ claude-blog/
   .mcp.example.json                  # MCP config example (tracked; .mcp.json is gitignored)
   pyproject.toml                     # Python packaging (3.11+)
   brain/                             # Vendored self-contained evidence-gated Obsidian brain; not plugin payload; tooling stays under skills/
+  adapters/astro/blogkit.py          # blog-kit engine CLI: convert, publish gates, approve, publish (fork)
+  adapters/astro/blogkit_verify.py   # Publish verifier, canonical copy synced into the blog repo (fork)
+  adapters/astro/blogkit_links.py    # External link checker for publish gate 6 (fork)
   scripts/analyze_blog.py            # 5-category quality scoring (stdlib)
   scripts/blog_preflight.py          # 5-gate delivery contract runner (v1.9.0)
   scripts/blog_render.py             # md -> html -> pdf renderer; XSS-safe JSON-LD (v1.9.0)
