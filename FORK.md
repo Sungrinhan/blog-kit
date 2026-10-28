@@ -26,7 +26,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `adapters/astro/blogkit_links.py`: 발행 게이트 6이 쓸 외부 링크 검사 모듈(stdlib). 설치본의 업스트림 `scripts/blog_preflight.py`(수정 없음)의 URL 형식·해석된 주소 전부 공개·연결 대상 고정·프록시 없음·자동 리다이렉트 금지·시간 제한·1바이트 읽기를 그대로 쓰고, 그 위에 자격 증명 URL 거부, 홉마다 같은 검사를 하는 리다이렉트 최대 5홉, 403·405의 HEAD 뒤 범위 GET, 결과 구분(ok, 403·405를 업스트림 형식 `external-links.allowed`에 정확히 적힌 URL만 allowed, mailto는 요청 없이 skipped, 차단은 정책 거부·영구 오류·일시 오류), 일시 오류(시간 초과·연결·DNS 실패·429·5xx)만 재시도 2회 뒤 경고를 더한다. 예외 목록 파일은 symlink 거부·64KB·UTF-8, 잘못된 항목은 줄 번호와 함께 거부. 잘못된 URL·리졸버 예외·예상 못 한 예외는 정책 거부로 끝나고, 결과는 URL을 SHA-256 앞 16자리로만 가리킨다
 - `tests/test_blogkit_links.py`: S3. 가짜 resolver(`socket.getaddrinfo` 대체)·opener로 홉별 검증·최종 404·410, 사설·메타데이터·loopback 주소와 그쪽 리다이렉트, 자격 증명, 5홉 경계, 일시 오류 재시도와 회복, 정책·영구 오류 재시도 없음, 403·405 예외 목록, mailto, 잘못된 URL, 예외 목록 파일 규칙, 결과에 URL 원문 없음 확인. 네트워크 없음
 - `tests/fixtures/blogkit/hash-vectors.json`: 내용 해시 골든 벡터. 한 번 생성해 고정한 값이라, 바뀌면 이미 발행한 글의 해시가 바뀐다는 뜻
-- `tests/test_adapters_release_scope.py`: 업스트림 릴리스 검사기가 보지 않는 `adapters/`에 같은 금지 문자열·설치 스크립트 링크 검사를 적용
+- `tests/test_adapters_release_scope.py`: 업스트림 릴리스 검사기가 보지 않는 `adapters/`에 같은 금지 문자열·설치 스크립트 링크 검사를 적용하고, M2b 시작 커밋 이후 바뀐 업스트림 파일이 버전 줄·`CHANGELOG.md`·개발자 문서(`CLAUDE.md`)뿐인지 확인(두 커밋 중 하나가 없는 clone은 건너뜀)
 - `scripts/confidential_check.py`: 기밀 검사(stdlib). 금칙어 목록은 기기별 `~/.config/blog-kit/confidential.txt` 하나(경로 옵션·환경 변수 없음, symlink 거부, 일반 파일, 256KB, UTF-8 strict, `#` 줄·빈 줄 무시, 유효 항목 0개면 차단). `list`는 목록 상태만, `scan`은 파일 목록 또는 `--slug`(공개본 글과 자산 폴더, 경로·slug 규칙은 설치본 검증기에서)를 루트 안에서만(symlink 구성 요소 거부) 읽는다. md(1MB)·svg(10MB)는 NFC+casefold 부분 문자열 일치로 차단, 바이너리 이미지는 건너뛰고 목록만, 그 밖의 형식·읽기·디코딩 실패·예외는 검사 불능으로 차단. 휴리스틱(사설 IP·내부 호스트 접미사·이메일·이슈 키·로컬 경로·단위 붙은 숫자)은 경고만, 긴 줄에서도 선형 시간. 출력은 분류·파일·줄 번호뿐이고 금칙어·일치 원문·예외 메시지는 내지 않는다
 - `tests/test_confidential_check.py`: 임시 HOME의 가짜 금칙어로 목록 상태·일치·휴리스틱·검사 불능·slug와 파일 목록 동등·예외·긴 줄 시간 확인, 모든 출력에 가짜 금칙어·원문 없음
 - `docs/BLOG-KIT-UPGRADE.md`: 블로그 레포 설정 예시와 설치·업그레이드·다운그레이드 순서(재시작 뒤 `sync-verifier` → 사본 커밋 → 설치 점검), uninstall 금지, 런타임 경로 첫 전환, 보존 확인
@@ -121,6 +121,8 @@ README·`docs/`·`.github/CONTRIBUTING.md`·`brain/` 등 업스트림 문서 본
 - M2c의 최종 판정은 검증 완료된 ref로만 한다.
 
 ## M2b 상태
+
+M2b 시작 커밋: `6eefc10772f9d81dff88b957dab04352b3bb0e1a` (이 커밋 이후 업스트림 파일 변경 범위를 `tests/test_adapters_release_scope.py`가 확인한다)
 
 - **구현 완료**: 엔진 커밋과 블로그 레포의 빌드 연결 커밋(prebuild 검증, 미리보기 스크립트, 검증기 사본)이 있고, 전체 자동 검증이 통과했으며, S4(`tests/test_blogkit_astro_e2e.py`)가 로컬에서 실제로 실행돼 통과했다.
 - **사람 검증 대기**: 사람 작업 티켓(`v2.3.1-kit.3` 태그와 push, 블로그 레포의 ref 고정, Cloudflare 배포·미리보기 명령 변경, 일부러 실패시킨 브랜치로 배포가 멈추는지 확인, 두 기기 설치 점검)이 열려 있다.
