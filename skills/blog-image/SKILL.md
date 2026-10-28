@@ -12,7 +12,7 @@ argument-hint: "[generate|edit|setup] [description-or-path]"
 license: MIT
 metadata:
   author: AgriciDaniel
-  version: "2.3.1-kit.2"
+  version: "2.3.1-kit.3"
   optional-mcp-package: "@ycse/nanobanana-mcp"
 ---
 

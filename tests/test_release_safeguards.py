@@ -580,8 +580,8 @@ def _public_fixture(root: Path) -> None:
     # Fork: distribution values are blog-kit's. The plugin author and the
     # standalone installers (raw URLs, embedded version) stay upstream.
     public = "https://github.com/Sungrinhan/blog-kit"
-    version = "2.3.1-kit.2"
-    python_version = "2.3.1+kit.2"
+    version = "2.3.1-kit.3"
+    python_version = "2.3.1+kit.3"
     raw_sh = (
         "https://raw.githubusercontent.com/AgriciDaniel/claude-blog/main/install.sh"
     )

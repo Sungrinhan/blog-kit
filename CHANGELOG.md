@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 이 절은 포크(blog-kit) 릴리스 기록이다. 업스트림 기준 커밋과 포크 변경 목록은 [`FORK.md`](FORK.md)에 있다. 아래 `[Unreleased]`부터는 업스트림 기록 그대로다.
 
+### [2.3.1-kit.3] - 2026-10-28
+
+#### Added
+
+- 발행 조건(M2b). 엔진 CLI `adapters/astro/blogkit.py`(`convert`·`check`·`status`·`approve`·`publish`·`sync-verifier`): 업스트림 형식 초안을 공개본(`draft: true`)과 글 전용 자산·발행 증거로 바꾸고, 발행 게이트 1~6(도구, 본문 안전성, `astro check`, 검수 기록, 기밀 검사, 미리보기 빌드와 링크 검사)을 내용 해시에 묶어 기록하며, 해시·경고 digest에 묶인 승인 뒤에만 글과 증거 두 경로를 커밋해 발행한다. 중단된 변환·발행은 다음 실행이 파일을 보고 복구한다.
+- 발행 검증기 `adapters/astro/blogkit_verify.py`: 블로그 레포에 바이트 사본으로 들어가 빌드 앞(소스 모드, `--ci`)과 배포 직전(`--dist`)에 증거 없는 공개 글과 산출물의 초안·비공개 파일·피드 URL을 막는다. 설치 점검 `/blog-doctor`가 사본 일치를 확인한다.
+- 기기별 금칙어 기밀 검사 `scripts/confidential_check.py`와 외부 링크 검사 모듈 `adapters/astro/blogkit_links.py`. 발행 증거를 내용 해시로 판정하는 ADR 0001과 용어집 항목.
+- 실제 Astro 빌드로 발행 전 과정을 확인하는 로컬 테스트 S4(`tests/test_blogkit_astro_e2e.py`). 실제 블로그 글 발행은 검수·학습 확인 기록을 만드는 M2c 전까지 차단 상태가 정상이다(`FORK.md`).
+
 ### [2.3.1-kit.2] - 2026-10-26
 
 - 버전만 올림(기능 변경 없음). 업그레이드·다운그레이드 확인용 두 번째 릴리스.

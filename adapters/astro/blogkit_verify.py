@@ -81,8 +81,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-VERIFIER_VERSION = "2.3.1-kit.2"
-SELF_DIGEST = {"sha256": "c0ad16aa4d615c9633bdd62f4090f65ac073db43835cbd479e61ad69cc4f3ff7"}
+VERIFIER_VERSION = "2.3.1-kit.3"
+SELF_DIGEST = {"sha256": "855fc8f8ead69e543643fbe6f70f3aeb7bd9436edbcce0f97b52df3204bbea75"}
 
 HASH_ALGO = "blogkit-content-v1"
 HASH_HEADER = b"blogkit-content-v1\n"
