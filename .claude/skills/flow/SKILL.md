@@ -26,8 +26,8 @@ allowed-tools: [Skill, Read, Grep, Glob, Bash, Edit, Write, Agent]
 | 계획 원본 | 새 블로그 개발 계획 아티팩트 https://claude.ai/artifact/Vn8nDoncYuCd7CMHooFT86 — 1단계 전에 Artifact `read`로 읽고, 해당 마일스톤 행·관련 절(결정 K/G, 3·4·7절)만 범위로 삼는다 |
 | 트래커 | GitHub Issues (`Sungrinhan/blog-kit`, `gh` CLI). 규칙은 `docs/agents/issue-tracker.md`, 라벨은 `docs/agents/triage-labels.md`. 상태 파일·스펙 초안·승인 대기 파일은 `.scratch/<slug>/`에 로컬로 둔다(커밋 안 함) |
 | 테스트 환경 | `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'` (없으면 이것이 첫 티켓) |
-| 테스트 | `.venv/bin/python -m pytest tests/` |
-| 검증 | `.venv/bin/python scripts/validate_skills.py --root .`, `python3 scripts/lint_prose.py`, `claude plugin validate .` (플러그인 이름 `claude-blog`을 유지하므로 매니페스트마다 "is reserved" 오류 1건, 마켓·플러그인 합쳐 2건이 알려진 정상) |
+| 테스트 | `.venv/bin/python -m pytest tests/`. 최저 지원 Python: `PATH=$PWD/.venv/bin:$PATH uv run --isolated --python 3.11 --extra dev pytest tests/`(CI는 push 때만 3.11~3.14로 돌므로, 버전 티켓의 A 확정 전에 한 번 돌린다) |
+| 검증 | `export PATH=$PWD/.venv/bin:$PATH` 뒤 7종(detect-secrets와 uv가 .venv에 있다): `python scripts/validate_skills.py --root .`, `python scripts/lint_prose.py`, `python scripts/validate_public_release.py --root .`, `python scripts/consistency_check.py --root .`, `python scripts/check_secrets.py`, `uv lock --check`, `claude plugin validate .` (플러그인 이름 `claude-blog`을 유지하므로 매니페스트마다 "is reserved" 오류 1건, 마켓·플러그인 합쳐 2건이 알려진 정상). 셸은 zsh라 `$VAR`의 파일 목록이 단어로 나뉘지 않는다: 경로를 직접 적거나 xargs로 넘긴다 |
 | 연결 레포 | 블로그 사이트 `~/Documents/devlog` (Sungrinhan/devlog). 엔진 설치 설정·발행 검증 같은 사이트 쪽 작업이 있다 |
 
 ## 두 레포에 걸친 티켓
@@ -107,11 +107,11 @@ codex: 2단계 승인(N회) | 미해결 <요약>; 4단계 …
 - **3단계**: 분할 승인과 발행 승인은 서로 다른 턴이다. devlog 변경이 있는 티켓은 표시한다.
 - **4단계**:
   - 티켓을 시작하기 전에 스펙의 Testing Decisions(승인된 seam)를 확인한다. 없거나 모호하면 테스트를 쓰기 전에 묻는다.
-  - 티켓을 시작할 때 `CLAUDE.md`의 Development Rules와 `.github/CONTRIBUTING.md`의 스크립트·보안 규칙을 읽는다. 새 입력 경로(파일·폴더 인자, 읽는 설정 파일)에는 크기 제한과 symlink 거부를 두고 행동 테스트로 확인한다.
+  - 티켓을 시작할 때 `CLAUDE.md`의 Development Rules와 `.github/CONTRIBUTING.md`의 스크립트·보안 규칙을 읽는다. 새 입력 경로(파일·폴더 인자, 읽는 설정 파일)에는 크기 제한과 symlink 거부를 두고 행동 테스트로 확인한다. 본문·파일 내용을 훑는 정규식과 스캐너에는 크기 상한의 최악 입력(긴 한 줄, 닫히지 않는 표식, 반복 접두어)으로 시간 제한 테스트를 둔다.
   - 구현 중 발견한 범위 밖 문제는 스펙 문장·표준 근거와 대조한다. 스펙이 요구하면 그 티켓에서 구현하고, 아니면 상태 파일의 `이월:` 목록에 적어 마무리에서 보고한다.
-  - 버전만 올리는 릴리스 티켓(다운그레이드 확인용 B 등)은 보류한다. 4단계 Codex와 5단계 선택 수정이 모두 커밋된 뒤 A 확정·전체 검증 → B 커밋·전체 검증 → 최종 A/B SHA를 상태 파일에 적는다. B에는 버전 표면과 CHANGELOG 한 줄만 넣는다.
+  - 버전만 올리는 릴리스 티켓은 보류한다. 4단계 Codex와 5단계 선택 수정이 모두 커밋된 뒤 A(버전을 올리기 직전 커밋) 확정·전체 검증 → 버전 커밋 → 깨끗한 트리에서 전체 검증 → 연결 레포 사본이 있으면 커밋된 정본과 cmp 일치를 확인하고 연결 레포에서 따로 커밋 → 최종 SHA를 상태 파일에 적는다. 버전 커밋에는 버전 문자열을 담은 파일(버전 표면, 포크 파일의 버전 상수와 그에 따라 바뀌는 자체 digest)과 그 버전의 CHANGELOG 항목만 넣는다. 다운그레이드 확인용 B를 따로 두는 마일스톤이면 B에는 버전 표면과 CHANGELOG 한 줄만 넣는다.
   - 원본 끝의 "code-review를 불러 리뷰하라"와 "현재 브랜치에 커밋하라"는 따르지 않는다.
-  - 티켓 하나마다 `실패하는 테스트 → 통과(테스트 명령) → /commit 계획 제시 → 승인 → 커밋`. 커밋되면 `tickets`를 갱신한다.
+  - 티켓 하나마다 `실패하는 테스트 → 통과(테스트 명령) → /commit 계획 제시 → 승인 → 커밋`. 커밋되면 `tickets`를 갱신한다. 처음부터 통과한 테스트(앞 조각 구현이 이미 막는 경우)는 그 테스트가 지키는 코드를 깨는 변이로 red를 확인하고 원복한다(원복은 cmp로 원본과 일치 확인). 살아남은 변이는 테스트를 보강할 신호다.
   - frontier(다음 티켓)는 상태 파일의 `tickets`가 기준이다. 티켓 이슈의 상태(닫기·댓글)는 바꾸지 않고, 마무리에서 한꺼번에 제안한다.
   - 모든 티켓이 커밋되면 레포별 비밀 검사 → Skill `codex`에 blog-kit `diff BASE..HEAD`(devlog 변경이 있으면 devlog `diff DEVLOG_BASE..HEAD`도 따로). 프롬프트에 표준 출처(`CLAUDE.md` Development Rules, `.github/CONTRIBUTING.md`)와 `FORK.md`의 승인된 예외를 넘겨 적용 여부도 보게 한다. 회차마다 지적 보고 → 사용자가 고른 것만 실패하는 테스트 → 고침 → 통과 → 재검토.
   - 루프가 끝나면 반영분을 `/commit` 승인 절차로 커밋한다.
