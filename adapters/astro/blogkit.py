@@ -17,9 +17,10 @@ sync-verifier stops there; every other command also requires the blog repo's
 verifier copy to match this install (doctor check i), so a stale copy is
 repaired with sync-verifier and nothing else, and the blog repo to be the root
 of a git work tree. Commands that change the evidence or the public copy
-(convert, check, approve, publish) hold inbox/<slug>/blogkit.lock, which
-records the process id and host; only a lock left by a dead process on this
-host is cleared.
+(convert, check, approve, publish) hold an exclusive flock on
+inbox/<slug>/blogkit.lock, which records the process id and host; only a lock
+left by a dead process on this host is cleared, and judging it happens under
+the flock.
 
 convert creates or replaces the public copy from the upstream-format draft. The
 draft frontmatter is a restricted subset (title, description of at most 160
@@ -51,7 +52,9 @@ check runs publish gates 1 to 6 and records each one in the evidence:
 the term list through scripts/confidential_check.py), 2 body safety (raw HTML
 and inline SVG outside code and autolinks, and SVG asset files, against the
 upstream renderer's allow-list of tags, attributes and href/src schemes;
-Markdown references by the convert rules; a file reference must be an image
+backticks inside a raw HTML block are not code; an autolink's scheme must be
+one that rule allows; Markdown references by the convert rules; a file
+reference must be an image
 in the post's asset folder; violations are reported, never fixed), 3
 `npx --no-install astro check` by its exit code, 4 a review record for the
 current hash with no P0 (written by the M2c reviewer), 5 the confidential
@@ -60,7 +63,8 @@ warning ids), 6 the draft preview build (`npx --no-install astro build
 --outDir .blogkit-preview` with BLOGKIT_INCLUDE_DRAFTS=1, into a folder the
 blog repo's .gitignore must list, emptied first) whose post page must exist,
 whose local images must resolve inside it, and against which the post's site
-links and anchors are resolved; the post's external URLs go through the link
+links and anchors are resolved; the post's external URLs (links, images and
+autolinks) go through the link
 check module (adapters/astro/blogkit_links.py, with the draft folder's
 external-links.allowed), and a transient failure is a warning. A warning id
 is <gate>:<category>:<file>:<line>[:<URL digest>]. The content hash is
@@ -71,8 +75,12 @@ current hash and the digest of the latest gate warnings, and only when gates
 1 to 6, the review and the learning check pass. publish needs complete
 evidence, every asset file in HEAD with the same bytes, and nothing staged
 but the post and its evidence; it flips the draft line atomically and
-commits those two paths as "publish: <slug>". After a failed commit, running
-it again only commits; nothing is ever reset. status shows the current and evidence hash, the gate
+commits those two paths as "publish: <slug>" from the checked bytes (blobs in
+a private index that the commit hooks run against; anything else a hook
+stages refuses the commit, and an edit made before the swap is kept and
+stops it; a swap or index update a stopped run left behind is finished
+first). After a failed commit,
+running it again only commits; nothing is ever reset. status shows the current and evidence hash, the gate
 records for the current hash, their warning ids and digest, and what the
 evidence still lacks.
 
@@ -87,7 +95,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 import datetime
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -99,6 +109,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 from html.parser import HTMLParser
 from pathlib import Path
@@ -136,10 +147,31 @@ SINGLE_QUOTED_RE = re.compile(r"'((?:[^']|'')*)'")
 # A YAML plain scalar that cannot be read as anything but this string.
 PLAIN_RE = re.compile(r"""[^\s\-?:,\[\]{}#&*!|>'"%@`](?:[^#:]|:(?! )|(?<! )#)*""")
 FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# Block quote and list item markers in front of a line's content.
+CONTAINER_RE = re.compile(r"(?:[ \t]*>[ \t]?|[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+)*")
+# CommonMark raw HTML block start conditions 1 to 7 and their end patterns (None: a blank line).
+HTML_BLOCK_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|"
+    "dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|"
+    "link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|"
+    "tfoot|th|thead|title|tr|track|ul")
+HTML_BLOCKS = (
+    (re.compile(r"<(?:script|pre|style|textarea)(?:[\s>]|$)", re.IGNORECASE),
+     re.compile(r"</(?:script|pre|style|textarea)>", re.IGNORECASE)),
+    (re.compile(r"<!--"), re.compile(r"-->")),
+    (re.compile(r"<\?"), re.compile(r"\?>")),
+    (re.compile(r"<![A-Za-z]"), re.compile(r">")),
+    (re.compile(r"<!\[CDATA\["), re.compile(r"\]\]>")),
+    (re.compile(rf"</?(?:{HTML_BLOCK_TAGS})(?:[\s/>]|$)", re.IGNORECASE), None),
+    (re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>[ \t]*$"), None),
+)
 # A Markdown inline destination right after "](", and a reference definition.
 INLINE_DEST_RE = re.compile(r"\]\([ \t]*(<[^<>\n]*>|[^\s()<>]*(?:\([^\s()<>]*\)[^\s()<>]*)*)(?=[ \t\n)])")
 REF_DEF_RE = re.compile(r"^ {0,3}\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(<[^<>\n]*>|\S+)", re.MULTILINE)
 FILE_REF_RE = re.compile(r"[A-Za-z0-9._/-]+")
+BACKTICKS_RE = re.compile(r"`+")
+# Where an inline raw HTML tag, comment, declaration or autolink could start: "<" before a non-space.
+TAG_START_RE = re.compile(r"<(?=[^\s<>])")
 # CommonMark autolinks (<scheme:...>, <user@host>): links, not raw HTML.
 AUTOLINK_RE = re.compile(
     r"<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)>")
@@ -281,9 +313,12 @@ def sync_verifier(blog: Path) -> dict:
 class SlugLock:
     """inbox/<slug>/blogkit.lock holding this process id and host.
 
-    A lock left by a process that no longer runs on this host is cleared; a
-    lock from another host, a live process or an unreadable lock file is kept
-    and the command is refused.
+    The lock is an exclusive flock on that file, taken without waiting, so
+    judging and taking over a lock is one step that two runs cannot share. A
+    lock left by a process that no longer runs on this host is cleared; a lock
+    from another host, a live process or an unreadable lock file is kept and
+    the command is refused. Release removes the file only while it is still
+    the one this run locked.
     """
 
     def __init__(self, blog: Path, slug: str) -> None:
@@ -292,35 +327,49 @@ class SlugLock:
         self.relative = f"{self.folder}/{LOCK_NAME}"
         self.path = blog / self.relative
         self.held = False
+        self.fd: int | None = None
 
     def __enter__(self) -> "SlugLock":
         refuse_symlinks(self.blog, self.relative)
         if not (self.blog / self.folder).is_dir():
             raise CliError("slug_folder_missing", self.folder)
-        for attempt in (1, 2):
-            try:
-                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
-            except FileExistsError:
-                if attempt == 1 and self._stale():
-                    self.path.unlink(missing_ok=True)
-                    continue
-                raise CliError("slug_locked", self.relative) from None
-            except OSError:
-                raise CliError("slug_lock_unreadable", self.relative) from None
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"pid": os.getpid(), "host": socket.gethostname()}, handle)
-            self.held = True
-            return self
-        raise CliError("slug_locked", self.relative)
-
-    def _stale(self) -> bool:
-        """Whether the existing lock belongs to a process that is gone from this host."""
         try:
-            fd = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(fd, "rb") as handle:
-                data = handle.read(MAX_LOCK_BYTES + 1)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        except OSError:
+            raise CliError("slug_lock_unreadable", self.relative) from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise CliError("slug_lock_unreadable", self.relative)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise CliError("slug_locked", self.relative) from None
+            if not self._same_file(fd):  # released and removed by its holder since we opened it
+                raise CliError("slug_locked", self.relative)
+            data = os.read(fd, MAX_LOCK_BYTES + 1)
+            if data and not self._stale(data):
+                raise CliError("slug_locked", self.relative)
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, json.dumps({"pid": os.getpid(), "host": socket.gethostname()}).encode("utf-8"), 0)
+        except BaseException:
+            os.close(fd)
+            raise
+        self.fd, self.held = fd, True
+        return self
+
+    def _same_file(self, fd: int) -> bool:
+        try:
+            here = os.lstat(self.path)
+        except OSError:
+            return False
+        mine = os.fstat(fd)
+        return (here.st_dev, here.st_ino) == (mine.st_dev, mine.st_ino)
+
+    def _stale(self, data: bytes) -> bool:
+        """Whether the lock content names a process that is gone from this host."""
+        try:
             holder = json.loads(data.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError):
             raise CliError("slug_lock_unreadable", self.relative) from None
         pid = holder.get("pid") if isinstance(holder, dict) else None
         host = holder.get("host") if isinstance(holder, dict) else None
@@ -339,8 +388,14 @@ class SlugLock:
         return False
 
     def __exit__(self, *exc) -> None:
-        if self.held:
-            self.path.unlink(missing_ok=True)
+        if self.fd is None:
+            return
+        try:
+            if self._same_file(self.fd):
+                self.path.unlink(missing_ok=True)
+        finally:
+            os.close(self.fd)
+            self.fd, self.held = None, False
 
 
 # ---------------------------------------------------------------- convert
@@ -465,30 +520,120 @@ def public_frontmatter(verifier, values: dict, path: str) -> str:
     return "---\n" + "\n".join(lines) + "\n---\n"
 
 
+class _Ahead:
+    """Next position of a few fixed strings at or after a cursor that only moves forward (linear in total)."""
+
+    def __init__(self, text: str, stop: int) -> None:
+        self.text, self.stop, self.found = text, stop, {}
+
+    def next(self, needle: str, at: int) -> int:
+        cached = self.found.get(needle)
+        if cached is None or (cached != -1 and cached < at):
+            cached = self.text.find(needle, at, self.stop)
+            self.found[needle] = cached
+        return cached
+
+
+def _tag_end(text: str, at: int, stop: int, ahead: _Ahead) -> int:
+    """End of the stretch that a possible inline tag starting at text[at] == "<" could cover.
+
+    Read generously (any "<" before a non-space starts one): a comment, processing
+    instruction or CDATA runs to its closing mark, anything else to the first ">"
+    outside quotes, and an unclosed one to stop. Reading too much as a tag only hides less.
+    """
+    for opener, closer in (("<!--", "-->"), ("<?", "?>"), ("<![CDATA[", "]]>")):
+        if text.startswith(opener, at):
+            end = ahead.next(closer, at + len(opener))
+            return stop if end < 0 else end + len(closer)
+    cursor = at + 1
+    while True:
+        marks = [(ahead.next(mark, cursor), mark) for mark in (">", '"', "'")]
+        marks = [(pos, mark) for pos, mark in marks if pos >= 0]
+        if not marks:
+            return stop
+        pos, mark = min(marks)
+        if mark == ">":
+            return pos + 1
+        close = ahead.next(mark, pos + 1)
+        if close < 0:
+            return stop
+        cursor = close + 1
+
+
 def _inline_code(text: str, start: int, stop: int) -> list[tuple[int, int]]:
-    runs = list(re.finditer(r"`+", text[start:stop]))
+    """Code spans in text[start:stop], read left to right as CommonMark does: an inline tag or
+    autolink that starts first is taken whole, so a backtick inside it opens nothing."""
+    runs = [(m.start(), m.end()) for m in BACKTICKS_RE.finditer(text, start, stop)]
+    by_length: dict[int, list[int]] = {}
+    for index, (begin, end) in enumerate(runs):
+        by_length.setdefault(end - begin, []).append(index)
+    ahead = _Ahead(text, stop)
     ranges = []
-    index = 0
+    pos, index = start, 0
     while index < len(runs):
-        opener = runs[index]
-        closer = next((j for j in range(index + 1, len(runs)) if len(runs[j][0]) == len(opener[0])), None)
-        if closer is None:
+        begin, end = runs[index]
+        if begin < pos:
             index += 1
             continue
-        ranges.append((start + opener.start(), start + runs[closer].end()))
-        index = closer + 1
+        tag = TAG_START_RE.search(text, pos, begin + 1)  # + 1: the lookahead may need the backtick itself
+        if tag:
+            pos = _tag_end(text, tag.start(), stop, ahead)
+            continue
+        slashes = 0
+        while begin - slashes > start and text[begin - slashes - 1] == "\\":
+            slashes += 1
+        opener = begin + slashes % 2  # outside code a backslash makes the first backtick a plain character
+        same = by_length.get(end - opener, [])
+        later = bisect.bisect_right(same, index)
+        if opener == end or later == len(same):
+            pos, index = end, index + 1
+            continue
+        closer = same[later]
+        ranges.append((opener, runs[closer][1]))
+        pos, index = runs[closer][1], closer + 1
     return ranges
 
 
+def _html_block_start(line: str):
+    """The end pattern of the raw HTML block this line starts (None: ends at a blank line), or False."""
+    rest = CONTAINER_RE.match(line).end()
+    content = line[rest:].lstrip()
+    for start, end in HTML_BLOCKS:
+        match = start.match(content)
+        if match:
+            return end
+    return False
+
+
 def _code_ranges(text: str) -> list[tuple[int, int]]:
-    """Character ranges of fenced code blocks and inline code spans."""
+    """Character ranges of fenced code blocks and inline code spans.
+
+    A raw HTML block (CommonMark start conditions 1 to 7, read generously,
+    also inside block quotes and list items) is HTML up to its end condition,
+    so backticks in it are not code. Reading too much as HTML only hides less.
+    """
     ranges: list[tuple[int, int]] = []
     fence = None
+    block = False  # False: not in a raw HTML block; None: one that ends at a blank line; else its end pattern
     segment = pos = 0
     for line in text.splitlines(keepends=True):
         start, pos = pos, pos + len(line)
         stripped = line.rstrip("\n")
+        if block is not False:
+            if block is None and not stripped[CONTAINER_RE.match(stripped).end():].strip():
+                block, segment = False, start
+            elif block is not None and block.search(stripped):
+                block, segment = False, pos
+            continue
         if fence is None:
+            opened = _html_block_start(stripped)
+            if opened is not False:
+                ranges += _inline_code(text, segment, start)
+                content = stripped[CONTAINER_RE.match(stripped).end():].lstrip()
+                block, segment = opened, pos
+                if opened is not None and opened.search(content, 1):
+                    block = False
+                continue
             match = FENCE_RE.match(stripped)
             if match and not (match[1][0] == "`" and "`" in stripped[match.end():]):
                 ranges += _inline_code(text, segment, start)
@@ -499,7 +644,7 @@ def _code_ranges(text: str) -> list[tuple[int, int]]:
             segment = pos
     if fence is not None:
         ranges.append((fence[2], len(text)))
-    else:
+    elif block is False:
         ranges += _inline_code(text, segment, len(text))
     return ranges
 
@@ -688,7 +833,7 @@ def _write_journal(path: Path, journal: dict) -> None:
 def _file_digest(path: Path, cap: int) -> str | None:
     """SHA-256 of a regular file, None when nothing is there, "unknown" otherwise."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         return None
     except OSError:
@@ -865,12 +1010,31 @@ def _read_journal(blog: Path, verifier, slug: str) -> dict:
     return journal
 
 
+def _only_journal_files(blog: Path, inbox: str, journal: dict) -> bool:
+    """Whether the stage and backup folders hold nothing but files the journal names."""
+    known = {target[key] for target in journal["targets"] for key in ("staged", "backup")}
+    for folder in (STAGE_DIR, BACKUP_DIR):
+        path = blog / inbox / folder
+        if not os.path.lexists(path):
+            continue
+        if path.is_symlink() or not path.is_dir():
+            return False
+        with os.scandir(path) as entries:
+            for count, entry in enumerate(entries):
+                if count >= MAX_FOLDER_ENTRIES or f"{inbox}/{folder}/{entry.name}" not in known:
+                    return False
+                if not entry.is_file(follow_symlinks=False):
+                    return False
+    return True
+
+
 def recover(blog: Path, slug: str, verifier) -> str | None:
     """Finish an interrupted convert unit by the files that are there.
 
     Before the applied mark every target goes back to its original state;
-    after it the new state stays and only cleanup is left. A lost original or
-    a file the journal does not know stops recovery with nothing changed.
+    after it the new state stays and only cleanup is left. A lost original, a
+    file the journal does not know (at a target or anywhere in the stage and
+    backup folders) stops recovery with nothing changed.
     """
     inbox = f"{verifier.INBOX_DIR}/{slug}"
     if not interrupted(blog, inbox):
@@ -884,6 +1048,8 @@ def recover(blog: Path, slug: str, verifier) -> str | None:
         _discard(blog, inbox)
         return "discarded"
     journal = _read_journal(blog, verifier, slug)
+    if not _only_journal_files(blog, inbox, journal):
+        raise blocked
     if journal["applied"]:
         _discard(blog, inbox)
         return "cleaned_up"
@@ -1062,9 +1228,16 @@ def _save_evidence(blog: Path, verifier, slug: str, evidence: dict) -> None:
     path = blog / _evidence_path(verifier, slug)
     temp = path.with_name(path.name + ".tmp")
     refuse_symlinks(blog, _evidence_path(verifier, slug) + ".tmp")
-    temp.unlink(missing_ok=True)
-    _write_new(temp, (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
-    os.replace(temp, path)
+    try:
+        temp.unlink(missing_ok=True)
+        _write_new(temp, (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+        os.replace(temp, path)
+    except OSError:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise CliError("evidence_write_failed", _evidence_path(verifier, slug)) from None
 
 
 def gate_1(blog: Path, doctor) -> dict:
@@ -1148,9 +1321,10 @@ def _blank(text: str, ranges) -> str:
     return "".join(chars)
 
 
-def _post_parts(post: bytes) -> tuple[str, list, str]:
-    """The post body with its frontmatter turned into blank lines, its Markdown references, and the
-    same text with code, autolinks and reference destinations blanked (what is left of raw HTML).
+def _post_parts(post: bytes) -> tuple[str, list, str, list[tuple[str, int]]]:
+    """The post body with its frontmatter turned into blank lines, its Markdown references, the
+    same text with code, autolinks and reference destinations blanked (what is left of raw HTML),
+    and the URL and line of each scheme autolink outside code (e-mail autolinks are left out).
 
     Offsets and line numbers match the post file.
     """
@@ -1158,8 +1332,11 @@ def _post_parts(post: bytes) -> tuple[str, list, str]:
     close = lines.index("---", 1)
     masked = "\n" * (close + 1) + "\n".join(lines[close + 1:])
     references = _references(masked)
-    hidden = _code_ranges(masked) + [m.span() for m in AUTOLINK_RE.finditer(masked)] + [r[:2] for r in references]
-    return masked, references, _blank(masked, hidden)
+    code = _code_ranges(masked)
+    found = list(AUTOLINK_RE.finditer(_blank(masked, code)))
+    autolinks = [(m[0][1:-1], masked.count("\n", 0, m.start()) + 1) for m in found if "@" not in m[0].split(":")[0]]
+    hidden = code + [m.span() for m in found] + [r[:2] for r in references]
+    return masked, references, _blank(masked, hidden), autolinks
 
 
 def gate_2(blog: Path, slug: str, verifier, render, post: bytes, assets: dict[str, bytes]) -> dict:
@@ -1180,8 +1357,11 @@ def gate_2(blog: Path, slug: str, verifier, render, post: bytes, assets: dict[st
                 errors.append(_error("reference_not_in_assets", path, line))
         return check
 
-    masked, references, blanked = _post_parts(post)
+    masked, references, blanked, autolinks = _post_parts(post)
     in_post = file_reference(post_path, post_path)
+    for url, line in autolinks:
+        if not render._is_safe_url(url, media=False):
+            errors.append(_error("reference_scheme_not_allowed", post_path, line))
     for start, _end, dest, image in references:
         line = masked.count("\n", 0, start) + 1
         try:
@@ -1334,12 +1514,12 @@ def gate_6(blog: Path, slug: str, verifier, render, post: bytes) -> dict:
         allowed = links.load_exceptions(blog / verifier.INBOX_DIR / slug / "draft")
     except links.LinkError as exc:
         return _gate(6, [_error(exc.code, f"{verifier.INBOX_DIR}/{slug}/draft", exc.line)])
-    masked, references, blanked = _post_parts(post)
+    masked, references, blanked, autolinks = _post_parts(post)
     html = _HtmlCheck(render, lambda url, line: None)
     html.feed(blanked)
     html.close()
     urls = [((dest[1:-1] if dest.startswith("<") else dest), masked.count("\n", 0, start) + 1)
-            for start, _end, dest, _image in references] + [(url, line) for url, line, _media in html.urls]
+            for start, _end, dest, _image in references] + [(url, line) for url, line, _media in html.urls] + autolinks
     results: dict[str, dict] = {}
     pages: dict[str, set[str] | None] = {}
     for url, line in sorted(urls, key=lambda item: item[1]):
@@ -1490,24 +1670,188 @@ def _assets_on_disk(blog: Path, verifier, slug: str) -> dict[str, str]:
     return dict(zip(paths, ids.split()))
 
 
-def _flip_draft(blog: Path, verifier, post_path: str) -> bool:
-    """Turn the single frontmatter "draft: true" line into "draft: false" atomically; False if already false."""
-    data = _read(verifier, blog, post_path, verifier.MAX_POST_BYTES)
-    start, stop = verifier._frontmatter_bounds(data)
+def _flipped(verifier, data: bytes, post_path: str) -> bytes:
+    """The post with its single frontmatter "draft" line set to "draft: false" (unchanged if already false)."""
+    try:
+        start, stop = verifier._frontmatter_bounds(data)
+    except verifier.VerifyError:
+        raise CliError("draft_line_count", post_path) from None
     lines = data[start:stop].split(b"\n")
     hits = [i for i, line in enumerate(lines) if verifier.DRAFT_LINE_RE.fullmatch(line)]
     if len(hits) != 1:
         raise CliError("draft_line_count", post_path)
-    if lines[hits[0]] == b"draft: false":
-        return False
     lines[hits[0]] = b"draft: false"
+    return data[:start] + b"\n".join(lines) + data[stop:]
+
+
+def _swap_post(blog: Path, verifier, post_path: str, checked: bytes, data: bytes) -> None:
+    """Put data in place of the post only while the post still holds the checked bytes.
+
+    The post is moved aside first and compared there, and the new file is
+    linked in, which never replaces a file that appeared meanwhile. An edit
+    made before the swap is put back and publishing stops; nothing a person
+    wrote is overwritten.
+    """
     path = blog / post_path
     temp = path.with_name(f".{path.name}.publish-tmp")
-    refuse_symlinks(blog, f"{verifier.POSTS_DIR}/{temp.name}")
+    old = path.with_name(f".{path.name}.publish-old")
+    old_relative = f"{verifier.POSTS_DIR}/{old.name}"
+    for name in (temp.name, old.name):
+        refuse_symlinks(blog, f"{verifier.POSTS_DIR}/{name}")
+    if os.path.lexists(old):
+        raise CliError("publish_backup_left", old_relative)
     temp.unlink(missing_ok=True)
-    _write_new(temp, data[:start] + b"\n".join(lines) + data[stop:])
-    os.replace(temp, path)
-    return True
+    _write_new(temp, data)
+    try:
+        os.rename(path, old)
+        if _read(verifier, blog, old_relative, verifier.MAX_POST_BYTES) != checked:
+            os.link(old, path)
+            old.unlink()
+            raise CliError("content_changed_during_check", post_path)
+        try:
+            os.link(temp, path)
+        except FileExistsError:
+            old.unlink()
+            raise CliError("content_changed_during_check", post_path) from None
+        except OSError:
+            os.link(old, path)  # the post goes back where it was
+            old.unlink()
+            raise CliError("publish_swap_failed", post_path) from None
+        if _read(verifier, blog, old_relative, verifier.MAX_POST_BYTES) != checked:
+            raise CliError("content_changed_during_check", old_relative)
+        old.unlink()
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _recover_swap(blog: Path, verifier, post_path: str) -> None:
+    """Finish a post swap that a stopped run left behind, judging by the files there.
+
+    With the post moved aside and nothing in its place, it is put back. When
+    the post already holds the moved-aside bytes (a put-back that stopped
+    before its cleanup) or their flipped copy (a swap that stopped before its
+    cleanup), the leftover goes. Anything else is kept and refused.
+    """
+    path = blog / post_path
+    old = path.with_name(f".{path.name}.publish-old")
+    old_relative = f"{verifier.POSTS_DIR}/{old.name}"
+    refuse_symlinks(blog, old_relative)
+    if not os.path.lexists(old):
+        return
+    moved = _read(verifier, blog, old_relative, verifier.MAX_POST_BYTES)
+    if not os.path.lexists(path):
+        os.link(old, path)
+        old.unlink()
+        return
+    current = _read(verifier, blog, post_path, verifier.MAX_POST_BYTES)
+    try:
+        flipped = _flipped(verifier, moved, post_path)
+    except CliError:
+        raise CliError("publish_backup_left", old_relative) from None
+    if current in (moved, flipped):
+        old.unlink()
+        return
+    raise CliError("publish_backup_left", old_relative)
+
+
+def _sync_index(blog: Path, blobs: dict[str, str]) -> None:
+    """Point the real index at the committed blobs of these paths (other entries untouched)."""
+    for path, blob in blobs.items():
+        if _git_output(blog, "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")[0] != 0:
+            raise CliError("index_update_failed", path)
+
+
+def _git_blob(blog: Path, data: bytes) -> str:
+    """Write data into the blog repo's object store as a blob; its id."""
+    try:
+        result = subprocess.run([shutil.which("git") or "git", "hash-object", "-w", "--stdin"], cwd=blog, input=data,
+                                capture_output=True, timeout=COMMAND_TIMEOUT, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired):
+        raise CliError("git_failed") from None
+    if result.returncode != 0:
+        raise CliError("git_failed")
+    return result.stdout.decode("ascii", "replace").strip()
+
+
+def _head_blob(blog: Path, path: str) -> str | None:
+    code, out = _git_output(blog, "rev-parse", "--verify", "-q", f"HEAD:{path}")
+    return out.strip() if code == 0 else None
+
+
+def _staged_paths(blog: Path) -> set[str]:
+    code, staged = _git_output(blog, "diff", "--cached", "--name-only", "-z")
+    if code != 0:
+        raise CliError("git_failed")
+    return set(filter(None, staged.split("\0")))
+
+
+def _git_env(blog: Path, index: Path | None = None, *args: str) -> tuple[int, str]:
+    """git with GIT_INDEX_FILE pointing at index (hooks run with it too); output parsed, never printed."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", **({"GIT_INDEX_FILE": str(index)} if index else {})}
+    try:
+        result = subprocess.run([shutil.which("git") or "git", *args], cwd=blog, capture_output=True, text=True,
+                                errors="replace", timeout=COMMAND_TIMEOUT, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        raise CliError("git_failed") from None
+    return result.returncode, result.stdout
+
+
+def _commit_blobs(blog: Path, blobs: dict[str, str], message: str, post_path: str) -> None:
+    """Commit HEAD plus exactly these path -> blob entries, with the repo's commit hooks.
+
+    The commit is built in a private index in a folder of this run's own
+    under the git folder: pre-commit and commit-msg run
+    against it, and it is refused (HEAD untouched) when a hook staged anything
+    else or changed the blobs. HEAD moves only if it did not move meanwhile;
+    the real index then gets the same two entries, and post-commit runs.
+    """
+    code, git_dir = _git_output(blog, "rev-parse", "--git-dir")
+    if code != 0:
+        raise CliError("git_failed")
+    work = Path(tempfile.mkdtemp(prefix="blogkit-publish-", dir=blog / git_dir.strip()))  # this run's own files
+    index, message_file = work / "index", work / "message"
+    code, head = _git_output(blog, "rev-parse", "--verify", "-q", "HEAD")
+    head = head.strip() if code == 0 else ""
+    try:
+        message_file.write_text(message, encoding="utf-8")
+        steps = [("read-tree", head) if head else ("read-tree", "--empty")]
+        steps += [("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}") for path, blob in blobs.items()]
+        for args in steps:
+            if _git_env(blog, index, *args)[0] != 0:
+                raise CliError("git_failed")
+        for hook in (("pre-commit",), ("commit-msg", "--", str(message_file))):
+            if _git_env(blog, index, "hook", "run", "--ignore-missing", *hook)[0] != 0:
+                raise CliError("commit_failed", post_path)
+        base = head or _empty_tree(blog)
+        code, changed = _git_env(blog, index, "diff-index", "--cached", "--name-only", "-z", base)
+        code_files, listing = _git_env(blog, index, "ls-files", "-s", "-z", "--", *blobs)
+        staged = {entry.split("\t", 1)[1]: entry.split()[1] for entry in filter(None, listing.split("\0"))}
+        if code or code_files or set(filter(None, changed.split("\0"))) - set(blobs) or staged != blobs:
+            raise CliError("other_changes_staged")
+        code, tree = _git_env(blog, index, "write-tree")
+        if code != 0:
+            raise CliError("git_failed")
+        parents = ["-p", head] if head else []
+        code, commit = _git_output(blog, "commit-tree", tree.strip(), *parents, "-F", str(message_file))
+        if code != 0:
+            raise CliError("commit_failed", post_path)
+        if _git_output(blog, "update-ref", "-m", message.splitlines()[0] if message.strip() else "publish",
+                       "HEAD", commit.strip(), head)[0] != 0:
+            raise CliError("commit_failed", post_path)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    _sync_index(blog, blobs)
+    _git_output(blog, "hook", "run", "--ignore-missing", "post-commit")
+
+
+def _empty_tree(blog: Path) -> str:
+    """The empty tree id in this repo's hash format."""
+    try:
+        result = subprocess.run([shutil.which("git") or "git", "hash-object", "-t", "tree", "--stdin"], cwd=blog,
+                                input=b"", capture_output=True, timeout=COMMAND_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        raise CliError("git_failed") from None
+    return result.stdout.decode("ascii", "replace").strip()
 
 
 def publish(blog: Path, slug: str, verifier) -> dict:
@@ -1515,39 +1859,48 @@ def publish(blog: Path, slug: str, verifier) -> dict:
 
     Refused unless the evidence is complete for the current hash, every file
     of the post's asset folder is in HEAD with the same bytes (and HEAD has
-    no other file there), and nothing but those two paths is staged. A run after a failed
-    commit finds draft: false and complete evidence and only commits; it
-    never resets anything.
+    no other file there), and nothing but those two paths is staged. The
+    commit holds exactly the bytes that were checked: they are written as
+    blobs and committed from a private index (see _commit_blobs), never read
+    again from the work tree, and HEAD is compared with them afterwards. The
+    post is swapped only while it still holds those bytes. A run after a
+    failed commit finds draft: false and complete evidence and only commits;
+    it never resets anything.
     """
     post_path = verifier.post_path_for(slug)
     evidence_path = _evidence_path(verifier, slug)
     assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
+    _recover_swap(blog, verifier, post_path)
+    post = _read(verifier, blog, post_path, verifier.MAX_POST_BYTES)
     current = _current_hash(blog, verifier, slug)
     evidence = _load_evidence(blog, verifier, slug)
+    record = _read(verifier, blog, evidence_path, verifier.MAX_EVIDENCE_BYTES)
     gaps = verifier.evidence_gaps(evidence, current)
     if gaps:
         raise CliError("evidence_incomplete", missing=gaps)
     if _assets_in_head(blog, verifier, slug) != _assets_on_disk(blog, verifier, slug):
         raise CliError("assets_not_committed", assets_dir)
-    code, staged = _git_output(blog, "diff", "--cached", "--name-only", "-z")
-    if code != 0:
-        raise CliError("git_failed")
-    if set(filter(None, staged.split("\0"))) - {post_path, evidence_path}:
+    if _staged_paths(blog) - {post_path, evidence_path}:
         raise CliError("other_changes_staged")
-    if _current_hash(blog, verifier, slug) != current:
+    if (_current_hash(blog, verifier, slug) != current
+            or _read(verifier, blog, post_path, verifier.MAX_POST_BYTES) != post
+            or _read(verifier, blog, evidence_path, verifier.MAX_EVIDENCE_BYTES) != record
+            or verifier.read_evidence(blog, slug) != evidence):
         raise CliError("content_changed_during_check", post_path)
-    resumed = not _flip_draft(blog, verifier, post_path)
-    code, pending = _git_output(blog, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--",
-                                post_path, evidence_path)
-    if code != 0:
-        raise CliError("git_failed")
-    if resumed and not pending:
+    flipped = _flipped(verifier, post, post_path)
+    resumed = flipped == post
+    if not resumed:
+        _swap_post(blog, verifier, post_path, post, flipped)
+    blobs = {post_path: _git_blob(blog, flipped), evidence_path: _git_blob(blog, record)}
+    if resumed and all(_head_blob(blog, path) == blob for path, blob in blobs.items()):
+        _sync_index(blog, blobs)  # a run stopped after moving HEAD may have left the index behind
         code, head = _git_output(blog, "rev-parse", "HEAD")
         return {"published": True, "commit": head.strip(), "resumed": True, "already_published": True}
-    for args in (("add", "--", post_path, evidence_path),
-                 ("commit", "-q", "-m", f"publish: {slug}", "--", post_path, evidence_path)):
-        if _git_output(blog, *args)[0] != 0:
-            raise CliError("commit_failed", post_path)
+    _commit_blobs(blog, blobs, f"publish: {slug}\n", post_path)
+    code, changed = _git_output(blog, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", "HEAD")
+    if (code != 0 or set(filter(None, changed.split("\0"))) - set(blobs)
+            or any(_head_blob(blog, path) != blob for path, blob in blobs.items())):
+        raise CliError("published_commit_mismatch", post_path)
     code, head = _git_output(blog, "rev-parse", "HEAD")
     return {"published": True, "commit": head.strip(), "resumed": resumed, "already_published": False}
 
@@ -1582,6 +1935,8 @@ def main(argv: list[str] | None = None) -> int:
         report.update(run(args, blog), status="ok", errors=[])
     except CliError as exc:
         report.update(exc.fields, errors=[exc.error()])
+    except OSError:  # a file operation outside the handled cases; its message names local paths
+        report.update(errors=[{"code": "io_failed", "path": ""}])
     print(json.dumps(report, indent=2))
     return 0 if report["status"] == "ok" else 1
 

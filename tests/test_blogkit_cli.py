@@ -408,6 +408,87 @@ def test_a_lock_from_another_host_or_unreadable_is_kept(engine: Engine, content:
     assert lock.read_text() == content
 
 
+LOCK_RACE = '''\
+"""Test bootstrap: a second process takes the lock while this one is judging a dead holder."""
+import os
+import runpy
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+cli, holder, out = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+real_kill = os.kill
+started = False
+
+
+def kill(pid, sig):
+    global started
+    if sig == 0 and not started:
+        started = True
+        with out.open("w") as handle:
+            subprocess.Popen([sys.executable, holder], stdout=handle)
+        deadline = time.time() + 20
+        while time.time() < deadline and not out.read_text():
+            time.sleep(0.05)
+    return real_kill(pid, sig)
+
+
+os.kill = kill
+sys.argv = [cli, *sys.argv[4:]]
+runpy.run_path(cli, run_name="__main__")
+'''
+LOCK_HOLDER = '''\
+"""The second process: the engine's own slug lock, held until the test releases it."""
+import runpy
+import time
+from pathlib import Path
+
+engine = runpy.run_path({cli!r})
+lock = engine["SlugLock"](Path({blog!r}), "first-post")
+try:
+    lock.__enter__()
+except engine["CliError"] as exc:
+    print(exc.code, flush=True)
+else:
+    print("held", flush=True)
+    deadline = time.time() + 30
+    while time.time() < deadline and not Path({release!r}).exists():
+        time.sleep(0.05)
+    lock.__exit__(None, None, None)
+'''
+
+
+def test_two_runs_reclaiming_a_dead_lock_never_both_hold_it(engine: Engine) -> None:
+    _lock(engine).write_text(json.dumps({"pid": _dead_pid(), "host": socket.gethostname()}))
+    release, out = engine.tmp / "release", engine.tmp / "holder-out.txt"
+    holder = engine.tmp / "holder.py"
+    holder.write_text(LOCK_HOLDER.format(cli=str(engine.cli), blog=str(engine.blog), release=str(release)))
+    script = engine.tmp / "lock-race.py"
+    script.write_text(LOCK_RACE)
+    wrapper = engine.tmp / "run-lock-race.py"
+    wrapper.write_text(
+        "import runpy, sys\n"
+        f"sys.argv = [{str(script)!r}, {str(engine.cli)!r}, {str(holder)!r}, {str(out)!r}, *sys.argv[1:]]\n"
+        f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    try:
+        rc, payload, output = engine.run("approve", "first-post", "--hash", "0" * 64, "--warnings", "0" * 64,
+                                         script=wrapper)
+    finally:
+        release.write_text("")
+    second = out.read_text().strip()
+    assert second in ("held", "slug_locked"), output
+    assert "slug_locked" in (second, *_codes(payload)), (second, output)
+
+
+def test_a_lock_that_is_a_fifo_is_refused_without_waiting(engine: Engine) -> None:
+    os.mkfifo(_lock(engine))
+    engine.timeout = 20
+    rc, payload, output = engine.run("check", "first-post")
+    assert (rc, _codes(payload)) == (1, ["slug_lock_unreadable"]), output
+
+
 def test_a_read_only_command_takes_no_lock(engine: Engine) -> None:
     lock = _lock(engine)
     lock.write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname()}))
@@ -777,6 +858,8 @@ def replace(src, dst, *args, **kwargs):
     global seen
     relative = Path(dst).relative_to(blog).as_posix()
     internal = "/.convert-stage/" in relative or "/.convert-backup/" in relative or "convert-journal" in relative
+    if mode == "fail-evidence" and relative.endswith("/publish-evidence.json"):
+        raise PermissionError(13, "injected failure " + str(dst))
     if mode == "fail-target" and not internal:
         seen += 1
         if seen == count:
@@ -786,7 +869,38 @@ def replace(src, dst, *args, **kwargs):
         (blog / "src" / "content" / "posts" / "first-post.md").write_text("made by hand\\n")
 
 
-os.replace = replace
+real_rename, real_link = os.rename, os.link
+
+
+def rename(src, dst, *args, **kwargs):
+    if mode == "edit-before-swap" and str(src).endswith("/src/content/posts/first-post.md"):
+        with open(src, "a", encoding="utf-8") as handle:
+            handle.write("edited just before the swap\\n")
+    real_rename(src, dst, *args, **kwargs)
+
+
+def link(src, dst, *args, **kwargs):
+    if mode == "fail-link" and ".publish-tmp" in str(src):
+        raise OSError(5, "injected failure")
+    real_link(src, dst, *args, **kwargs)
+    if mode == "edit-after-flip" and ".publish-tmp" in str(src):
+        with open(dst, "a", encoding="utf-8") as handle:
+            handle.write("edited after the last check\\n")
+
+
+os.replace, os.rename, os.link = replace, rename, link
+
+if mode == "fail-index-update":
+    import subprocess
+    real_run = subprocess.run
+
+    def run(args, *rest, **kwargs):
+        env = kwargs.get("env") or {}
+        if "update-index" in args and "GIT_INDEX_FILE" not in env:
+            return subprocess.CompletedProcess(args, 1, "", "")
+        return real_run(args, *rest, **kwargs)
+
+    subprocess.run = run
 sys.argv = [cli, *sys.argv[5:]]
 runpy.run_path(cli, run_name="__main__")
 '''
@@ -1035,8 +1149,8 @@ import shutil
 import sys
 
 cli, mode, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
-seen = {"replace": 0, "rmtree": 0}
-real = {"replace": os.replace, "rmtree": shutil.rmtree}
+seen = {"replace": 0, "rmtree": 0, "rename": 0}
+real = {"replace": os.replace, "rmtree": shutil.rmtree, "rename": os.rename}
 
 
 def wrap(name):
@@ -1053,6 +1167,7 @@ def wrap(name):
 
 os.replace = wrap("replace")
 shutil.rmtree = wrap("rmtree")
+os.rename = wrap("rename")
 sys.argv = [cli, *sys.argv[4:]]
 runpy.run_path(cli, run_name="__main__")
 '''
@@ -1225,6 +1340,15 @@ def _unknown_staged(e: Engine) -> None:
         staged.write_bytes(b"unknown bytes\n")
 
 
+def _stray(folder: str):
+    """A file the journal does not name, left in the unit's stage or backup folder."""
+    def change(e: Engine) -> None:
+        path = e.blog / "inbox" / SLUG / folder
+        path.mkdir(exist_ok=True)
+        (path / "notes").write_bytes(b"not the journal's\n")
+    return change
+
+
 def _tampered_journal(e: Engine) -> None:
     journal = e.blog / "inbox" / SLUG / "convert-journal.json"
     data = json.loads(journal.read_text(encoding="utf-8"))
@@ -1241,7 +1365,11 @@ def _tampered_journal(e: Engine) -> None:
     (3, _unknown_backup, "convert_recovery_blocked"),
     (3, _unknown_staged, "convert_recovery_blocked"),
     (3, _tampered_journal, "journal_invalid"),
-], ids=["lost backup", "unknown new target", "unknown post", "unknown backup", "unknown staged", "tampered journal"])
+    (3, _stray(".convert-backup"), "convert_recovery_blocked"),
+    (3, _stray(".convert-stage"), "convert_recovery_blocked"),
+    (10, _stray(".convert-backup"), "convert_recovery_blocked"),
+], ids=["lost backup", "unknown new target", "unknown post", "unknown backup", "unknown staged", "tampered journal",
+        "stray backup file", "stray stage file", "stray file after the applied mark"])
 def test_recovery_that_cannot_be_judged_changes_nothing(engine: Engine, count: int, change, code: str) -> None:
     _stopped_reconvert(engine, count)
     change(engine)
@@ -1440,6 +1568,8 @@ GATE_2_BLOCKS = [
     ("inline svg script", "<svg><script>alert(1)</script></svg>\n", "html_tag_not_allowed"),
     ("inline svg foreign object", "<svg><foreignObject></foreignObject></svg>\n", "html_tag_not_allowed"),
     ("markdown javascript link", "[x](javascript:alert(1))\n", "reference_scheme_not_allowed"),
+    ("javascript autolink", "See <javascript:alert(1)> here.\n", "reference_scheme_not_allowed"),
+    ("file autolink", "<file:///etc/hosts>\n", "reference_scheme_not_allowed"),
     ("markdown file outside assets", "![x](../../assets/posts/other/a.png)\n", "reference_not_in_assets"),
     ("markdown missing asset", "![x](../../assets/posts/first-post/none.png)\n", "reference_not_in_assets"),
     ("raw html file outside assets", '<img src="../../assets/posts/other/a.png" alt="x">\n', "reference_not_in_assets"),
@@ -1486,6 +1616,74 @@ def test_html_inside_code_autolinks_and_comments_pass_gate_2(engine: Engine) -> 
         "<figcaption>Fig</figcaption></figure>\n"
         '<svg viewBox="0 0 10 10" width="10"><rect x="1" y="1" width="2" height="2" fill="red"/></svg>\n'
     ))
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+
+
+@pytest.mark.parametrize("text,offset", [
+    ("<div>\n```\n<script>alert(1)</script>\n```\n</div>\n", 2),
+    ("<div>\n`<script>alert(1)</script>`\n</div>\n", 1),
+    ("<div>`<script>alert(1)</script>`</div>\n", 0),
+    ("> <div>\n> `<script>alert(1)</script>`\n", 1),
+    ("<!-- note\n```\n-->\n<script>alert(1)</script>\n", 3),
+], ids=["fence in block", "inline code in block", "one-line block", "block in quote", "fence in comment"])
+def test_backticks_inside_a_raw_html_block_are_not_code(engine: Engine, text: str, offset: int) -> None:
+    """CommonMark reads a raw HTML block as HTML up to its end; backticks in it are not code."""
+    _checkable(engine)
+    _append_post(engine, "\n" + text)
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1, output
+    assert {"code": "html_tag_not_allowed", "path": POST, "line": POST_LINES + 2 + offset} in _gates(payload)[2]["errors"]
+
+
+def test_backticks_inside_an_inline_html_tag_are_not_code(engine: Engine) -> None:
+    """CommonMark reads a complete inline tag before code spans, so a backtick in an attribute opens nothing."""
+    _checkable(engine)
+    _append_post(engine, '\nSee <span class="`">prefix<script>alert(1)</script>end` here.\n')
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1, output
+    assert {"code": "html_tag_not_allowed", "path": POST, "line": POST_LINES + 2} in _gates(payload)[2]["errors"]
+
+
+@pytest.mark.parametrize("unit", ["<!--`", '<a b="`', "` x ", "``` ` <x `", "<`", "<a '`\" ", "\\\\\\`"],
+                         ids=["open comments", "open quotes", "ticks", "mixed runs", "bare tags", "mixed quotes",
+                              "escaped ticks"])
+def test_reading_code_and_tags_stays_linear_on_a_large_post(engine: Engine, unit: str) -> None:
+    _checkable(engine)
+    _append_post(engine, "\n" + unit * (900 * 1024 // len(unit)) + "\n")
+    _review(engine)
+    engine.timeout = 60
+    rc, payload, output = engine.run("check", SLUG)
+    assert payload.get("command") == "check", output
+
+
+@pytest.mark.parametrize("text", ["\\`<script>alert(1)</script>`\n", "\\``<img src=x onerror=alert(1)>``\n"],
+                         ids=["escaped backtick", "escaped double backtick"])
+def test_an_escaped_backtick_opens_no_code(engine: Engine, text: str) -> None:
+    _checkable(engine)
+    _append_post(engine, "\n" + text)
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1, output
+    codes = {error["code"] for error in _gates(payload)[2]["errors"]}
+    assert codes & {"html_tag_not_allowed", "html_attribute_not_allowed"}, payload
+
+
+def test_a_backtick_after_an_escaped_backslash_still_opens_code(engine: Engine) -> None:
+    _checkable(engine)
+    _append_post(engine, "\nA path \\\\`<script>` is code.\n")
+    _review(engine)
+    rc, payload, output = engine.run("check", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+
+
+def test_code_after_a_raw_html_block_ends_is_still_code(engine: Engine) -> None:
+    _checkable(engine)
+    _append_post(engine, "\n<div>\n</div>\n\n```html\n<script>alert(1)</script>\n```\n\n"
+                         "Inline `<script>` after <span>text</span> stays code.\n")
     _review(engine)
     rc, payload, output = engine.run("check", SLUG)
     assert (rc, payload["errors"]) == (0, []), output
@@ -1653,6 +1851,15 @@ def test_a_blocked_external_url_fails_gate_6_by_digest(engine: Engine, net: dict
     gate = _gate_6(engine)
     assert {"code": code, "path": POST, "line": _line_of(text), "url": _url_digest(url)} in gate["errors"]
     assert gate["passed"] is False
+
+
+def test_an_autolink_goes_through_the_external_link_check(engine: Engine) -> None:
+    _checkable(engine)
+    url = "https://autolink.example.com/private"
+    _append_post(engine, f"\nSee <{url}>.\n")
+    engine.net["hosts"] = {"autolink.example.com": "10.0.0.1"}
+    gate = _gate_6(engine)
+    assert gate["errors"] == [{"code": "link_policy", "path": POST, "line": POST_LINES + 2, "url": _url_digest(url)}]
 
 
 def test_a_transient_external_failure_is_a_gate_6_warning(engine: Engine) -> None:
@@ -1841,6 +2048,115 @@ def test_the_whole_path_publishes_the_post_and_evidence_only(engine: Engine) -> 
         _no_leak(output)
         assert "example.com" not in output and FAKE_TERM not in output
     _no_leak((engine.blog / EVIDENCE).read_text(encoding="utf-8"))
+
+
+def test_a_failed_evidence_write_is_a_json_error_and_leaves_no_temp_file(engine: Engine) -> None:
+    _checkable(engine)
+    _review(engine)
+    before = (engine.blog / EVIDENCE).read_bytes()
+    rc, payload, output = engine.run("check", SLUG, script=_bootstrap(engine, "fail-evidence"))
+    assert (rc, _codes(payload)) == (1, ["evidence_write_failed"]), output
+    assert "Traceback" not in output and "injected" not in output and str(engine.blog) not in output
+    assert (engine.blog / EVIDENCE).read_bytes() == before
+    assert not (engine.blog / (EVIDENCE + ".tmp")).exists()
+
+
+def test_an_edit_just_before_the_swap_is_kept_and_stops_publishing(engine: Engine) -> None:
+    _approved(engine)
+    head = _git(engine, "rev-parse", "HEAD")
+    rc, payload, output = engine.run("publish", SLUG, script=_bootstrap(engine, "edit-before-swap"))
+    assert (rc, _codes(payload)) == (1, ["content_changed_during_check"]), output
+    assert (engine.blog / POST).read_text(encoding="utf-8") == EXPECTED_POST + "edited just before the swap\n"
+    assert _git(engine, "rev-parse", "HEAD") == head
+    assert sorted(p.name for p in (engine.blog / "src" / "content" / "posts").iterdir()) == [f"{SLUG}.md"]
+
+
+def test_a_hook_that_stages_another_file_changes_nothing(engine: Engine) -> None:
+    _approved(engine)
+    (engine.blog / "README.md").write_text("tracked\n")
+    _git(engine, "add", "--", "README.md")
+    _git(engine, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "readme")
+    (engine.blog / "README.md").write_text("tracked, edited by hand\n")
+    hook = engine.blog / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\ngit add -u\nexit 0\n")
+    hook.chmod(0o755)
+    head = _git(engine, "rev-parse", "HEAD")
+    for _ in range(2):
+        rc, payload, output = engine.run("publish", SLUG)
+        assert (rc, _codes(payload)) == (1, ["other_changes_staged"]), output
+        assert _git(engine, "rev-parse", "HEAD") == head
+    assert "README.md" not in _git(engine, "diff", "--cached", "--name-only")
+
+
+def test_a_failed_swap_puts_the_post_back(engine: Engine) -> None:
+    _approved(engine)
+    before = (engine.blog / POST).read_bytes()
+    rc, payload, output = engine.run("publish", SLUG, script=_bootstrap(engine, "fail-link"))
+    assert rc == 1, output
+    assert (engine.blog / POST).read_bytes() == before
+    assert sorted(p.name for p in (engine.blog / "src" / "content" / "posts").iterdir()) == [f"{SLUG}.md"]
+    rc, payload, output = engine.run("publish", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+
+
+def test_a_swap_stopped_midway_is_finished_by_the_next_publish(engine: Engine) -> None:
+    _approved(engine)
+    rc, _, output = engine.run("publish", SLUG, script=_crash(engine, "after-rename", 1))
+    assert rc == 9, output
+    assert not (engine.blog / POST).exists()
+    rc, payload, output = engine.run("publish", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+    assert _git(engine, "show", f"HEAD:{POST}") == EXPECTED_POST.replace("draft: true", "draft: false")
+    assert sorted(p.name for p in (engine.blog / "src" / "content" / "posts").iterdir()) == [f"{SLUG}.md"]
+
+
+def test_a_restore_stopped_before_its_cleanup_is_finished_by_the_next_publish(engine: Engine) -> None:
+    """The post went back but the moved-aside copy of the same bytes stayed."""
+    _approved(engine)
+    os.link(engine.blog / POST, engine.blog / "src" / "content" / "posts" / f".{SLUG}.md.publish-old")
+    rc, payload, output = engine.run("publish", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+    assert sorted(p.name for p in (engine.blog / "src" / "content" / "posts").iterdir()) == [f"{SLUG}.md"]
+
+
+def test_a_leftover_that_cannot_be_read_as_a_post_is_kept_and_refused(engine: Engine) -> None:
+    _approved(engine)
+    leftover = engine.blog / "src" / "content" / "posts" / f".{SLUG}.md.publish-old"
+    leftover.write_text("no frontmatter here\n")
+    before = (engine.blog / POST).read_bytes()
+    rc, payload, output = engine.run("publish", SLUG)
+    assert (rc, _codes(payload)) == (1, ["publish_backup_left"]), output
+    assert leftover.read_text() == "no frontmatter here\n" and (engine.blog / POST).read_bytes() == before
+
+
+def test_an_index_left_behind_after_the_commit_is_finished_by_the_next_publish(engine: Engine) -> None:
+    _approved(engine)
+    rc, payload, output = engine.run("publish", SLUG, script=_bootstrap(engine, "fail-index-update"))
+    assert rc == 1, output
+    assert _git(engine, "log", "-1", "--format=%s") == f"publish: {SLUG}\n"
+    rc, payload, output = engine.run("publish", SLUG)
+    assert (rc, payload["errors"], payload["already_published"]) == (0, [], True), output
+    assert _git(engine, "status", "--porcelain", "--", POST, EVIDENCE) == ""
+
+
+def test_publishing_leaves_other_runs_files_in_the_git_folder_alone(engine: Engine) -> None:
+    _approved(engine)
+    others = [engine.blog / ".git" / name for name in ("blogkit-publish-index", "blogkit-publish-msg")]
+    for path in others:
+        path.write_text("another run's file\n")
+    rc, payload, output = engine.run("publish", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+    assert [path.read_text() for path in others] == ["another run's file\n"] * 2
+
+
+def test_an_edit_after_the_last_check_is_not_committed(engine: Engine) -> None:
+    _approved(engine)
+    rc, payload, output = engine.run("publish", SLUG, script=_bootstrap(engine, "edit-after-flip"))
+    assert (rc, payload["errors"]) == (0, []), output
+    published = EXPECTED_POST.replace("draft: true", "draft: false")
+    assert _git(engine, "show", f"HEAD:{POST}") == published
+    assert (engine.blog / POST).read_text(encoding="utf-8") == published + "edited after the last check\n"
+    assert sorted(_git(engine, "show", "--name-only", "--format=", "HEAD").split()) == sorted([EVIDENCE, POST])
 
 
 def _stage_other(e: Engine) -> None:
