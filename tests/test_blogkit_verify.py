@@ -291,6 +291,13 @@ def _evidence_symlink(b: Blog) -> None:
     b.path("inbox/p").symlink_to(real)
 
 
+def _evidence_fifo(b: Blog) -> None:
+    b.post("p")
+    b.evidence("p")
+    b.path("inbox/p/publish-evidence.json").unlink()
+    os.mkfifo(b.path("inbox/p/publish-evidence.json"))
+
+
 FAILING = {
     "no evidence": (_no_evidence, "missing_file"),
     "body changed after approval": (_body_changed, "content_hash_mismatch"),
@@ -315,6 +322,7 @@ FAILING = {
     "invalid slug": (_bad_slug, "slug_invalid"),
     "preview switch set": (_preview_switch, "preview_drafts_enabled"),
     "evidence folder is a symlink": (_evidence_symlink, "symlink_refused"),
+    "evidence is a FIFO": (_evidence_fifo, "not_a_regular_file"),
 }
 
 
@@ -395,6 +403,10 @@ def _wrong_post(e: dict) -> None:
     e["slug"] = "other"
 
 
+def _kind_of_wrong_type(e: dict) -> None:
+    e["records"].append({"kind": [], "content_hash": "0" * 64, "engine_version": ENGINE})
+
+
 CONTRACT = {
     "field missing": (_drop_field, "evidence_fields"),
     "wrong type": (_wrong_type, "evidence_contract_invalid"),
@@ -412,6 +424,7 @@ CONTRACT = {
     "unknown record kind": (_record_unknown_kind, "evidence_record_kind"),
     "gate number out of range": (_gate_out_of_range, "evidence_record_type"),
     "evidence for another post": (_wrong_post, "evidence_wrong_post"),
+    "record kind of the wrong type": (_kind_of_wrong_type, "evidence_record_kind"),
 }
 
 
@@ -683,6 +696,26 @@ def _xml_with(declaration: str):
     return setup
 
 
+def _xml_encoded(encoding: str):
+    """The feed re-encoded (UTF-16 needs no ASCII "<!DOCTYPE" bytes) with a DOCTYPE and an entity."""
+    def setup(b: Blog) -> Dist:
+        dist = _published(b)
+        text = (dist.root / "rss.xml").read_text(encoding="utf-8")
+        text = text.replace('encoding="UTF-8"?>', 'encoding="UTF-16"?><!DOCTYPE rss [<!ENTITY e "x">]>', 1)
+        dist.write("rss.xml", text.replace("<title>t</title>", "<title>&e;</title>", 1).encode(encoding))
+        return dist
+    return setup
+
+
+def _xml_declared(encoding: str):
+    def setup(b: Blog) -> Dist:
+        dist = _published(b)
+        text = (dist.root / "rss.xml").read_text(encoding="utf-8")
+        dist.write("rss.xml", text.replace('encoding="UTF-8"', f'encoding="{encoding}"', 1))
+        return dist
+    return setup
+
+
 def _feed_url(where: str, url: str):
     def setup(b: Blog) -> Dist:
         dist = _published(b)
@@ -740,6 +773,9 @@ DIST_FAILING = {
     "too many files": (_too_many_files, "too_many_entries"),
     "XML with a DOCTYPE": (_xml_with('<!DOCTYPE rss [<!ENTITY e "x">]>'), "dist_xml_doctype"),
     "XML with a lowercase doctype": (_xml_with("<!doctype rss>"), "dist_xml_doctype"),
+    "UTF-16 XML with a DOCTYPE": (_xml_encoded("utf-16"), "dist_xml_encoding"),
+    "UTF-16 XML without a byte order mark": (_xml_encoded("utf-16-le"), "dist_xml_encoding"),
+    "XML declaring another encoding": (_xml_declared("ISO-8859-1"), "dist_xml_encoding"),
     "sitemap URL on another origin": (_feed_url("extra_urls", "https://other.example.test/about/"), "dist_url_origin"),
     "sitemap URL on another scheme": (_feed_url("extra_urls", "http://blog.example.test/about/"), "dist_url_origin"),
     "RSS link on another origin": (_feed_url("extra_links", "https://other.example.test/posts/first-post/"),
@@ -757,6 +793,14 @@ DIST_FAILING = {
     **{f"{name} missing": (_without(name), "missing_file") for name in REQUIRED_OUTPUTS},
     **{f"{name} missing with no posts": (_without(name, posts=False), "missing_file") for name in REQUIRED_OUTPUTS},
 }
+
+
+def test_an_absolute_output_path_through_a_symlinked_folder_is_refused(blog: Blog, tmp_path: Path) -> None:
+    _published(blog)
+    link = tmp_path / "blog-link"
+    link.symlink_to(blog.root)
+    rc, payload, _ = run_dist(blog, link / "dist")
+    assert rc == 1 and _codes(payload) == ["symlink_refused"], payload
 
 
 @pytest.mark.parametrize("case", sorted(DIST_FAILING))

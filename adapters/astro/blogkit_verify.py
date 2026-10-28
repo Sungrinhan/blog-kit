@@ -31,7 +31,7 @@ deployable output.
 Deploy output mode (--dist FOLDER) runs source mode, then checks the built
 site the deploy command is about to upload:
 
-- no symlink on the folder (or on any component of a relative path) or
+- no symlink on the folder (or on any component of its path) or
   anywhere inside it, only regular files and folders, at most 20000 entries,
   HTML and XML files at most 5MB each
 - the home page, posts/index.html, rss.xml, sitemap-index.xml and every
@@ -41,8 +41,8 @@ site the deploy command is about to upload:
 - every URL in rss.xml and the sitemaps shares the origin of the first
   sitemap-index URL, maps to <path>/index.html inside the folder, and, when it
   is a post URL, names a verified public post; sub-sitemaps are root
-  sitemap-<number>.xml files followed one level deep; XML with a DOCTYPE or
-  entity declaration is refused
+  sitemap-<number>.xml files followed one level deep; XML that is not
+  UTF-8 or has a DOCTYPE or entity declaration is refused
 - no inbox/ or .blogkit/ folder, evidence file, review, state, claims or
   approval record, or .md/.mdx draft source ships
 
@@ -82,7 +82,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 VERIFIER_VERSION = "2.3.1-kit.2"
-SELF_DIGEST = {"sha256": "f7e352bc5588e1f291b7c030e6c380492289caf14aa5385cc2b4db2b356d8931"}
+SELF_DIGEST = {"sha256": "eb44cc61993a70911ab1d59a7e18b8cbd8ad9e99af2f3a0553a1b73c2343ebec"}
 
 HASH_ALGO = "blogkit-content-v1"
 HASH_HEADER = b"blogkit-content-v1\n"
@@ -99,6 +99,7 @@ PRIVATE_NAMES = frozenset({EVIDENCE_NAME, "state.md", "review.md", "claims.json"
 SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 SUB_SITEMAP_RE = re.compile(r"sitemap-[0-9]+\.xml")
 DOCTYPE_RE = re.compile(rb"<!(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+XML_ENCODING_RE = re.compile(rb"""\A(?:\xef\xbb\xbf)?<\?xml[^>]*?\bencoding\s*=\s*["']([^"']*)["']""")
 
 MAX_POST_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 10 * 1024 * 1024
@@ -160,7 +161,7 @@ def _read_capped(root: Path, relative: str, cap: int) -> bytes:
     _no_symlink_components(root, relative)
     path = root / relative
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         raise VerifyError("missing_file", relative) from None
     except OSError:
@@ -379,7 +380,7 @@ def validate_evidence(evidence) -> None:
         raise VerifyError("evidence_records")
     seen: set = set()
     for record in records:
-        if not isinstance(record, dict) or record.get("kind") not in RECORD_KEYS:
+        if not isinstance(record, dict) or not isinstance(record.get("kind"), str) or record["kind"] not in RECORD_KEYS:
             raise VerifyError("evidence_record_kind")
         kind = record["kind"]
         if set(record) != RECORD_KEYS[kind]:
@@ -587,8 +588,19 @@ def _built_posts(files: list[str]) -> tuple[set[str], list[dict]]:
 
 
 def _read_xml(dist: Path, relative: str) -> ET.Element:
-    """Parse a feed or sitemap, refusing DOCTYPE and entity declarations before expat sees them."""
+    """Parse a feed or sitemap, refusing DOCTYPE and entity declarations before expat sees them.
+
+    Only UTF-8 is read (no NUL, no other declared encoding), so the byte check
+    for declarations sees what expat will parse; UTF-16 would hide them.
+    """
     data = _read_capped(dist, relative, MAX_PAGE_BYTES)
+    declared = XML_ENCODING_RE.match(data)
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise VerifyError("dist_xml_encoding", relative) from None
+    if b"\x00" in data or (declared and declared[1].lower() not in (b"utf-8", b"utf8")):
+        raise VerifyError("dist_xml_encoding", relative)
     if DOCTYPE_RE.search(data):
         raise VerifyError("dist_xml_doctype", relative)
     try:
@@ -697,11 +709,10 @@ def verify_dist(dist: Path, public: list[str]) -> list[dict]:
 
 
 def dist_root(argument: str) -> Path:
-    """Resolve --dist, refusing a symlink on the folder or on any component of a relative path."""
+    """Resolve --dist, refusing a symlink on the folder or on any component of its path."""
     given = Path(argument)
-    parts = given.parts if not given.is_absolute() else (given.name,)
-    current = given.parent if given.is_absolute() else Path()
-    for part in parts:
+    current = Path()
+    for part in given.parts:
         current = current / part
         if current.is_symlink():
             raise VerifyError("symlink_refused")
