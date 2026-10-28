@@ -477,7 +477,8 @@ def test_a_symlinked_repo_argument_is_refused(blog: Blog, tmp_path: Path) -> Non
     link.symlink_to(blog.root)
     result = subprocess.run([sys.executable, str(VERIFIER), "--repo", str(link)],
                             capture_output=True, text=True, timeout=60)
-    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert (result.returncode, payload["status"], _codes(payload)) == (1, "fail", ["repo_is_symlink"])
 
 
 # ------------------------------------------------------------------ content hash bytes

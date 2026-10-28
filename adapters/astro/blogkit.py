@@ -1927,8 +1927,8 @@ def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.blog_repo and Path(args.blog_repo).is_symlink():
-        print(json.dumps({"status": "error", "errors": [{"code": "blog_repo_is_symlink", "path": ""}]}, indent=2))
-        return 2
+        print(json.dumps({"status": "fail", "errors": [{"code": "blog_repo_is_symlink", "path": ""}]}, indent=2))
+        return 1
     blog = Path(args.blog_repo or Path.cwd()).resolve()
     report: dict = {"status": "fail", "command": args.command}
     try:

@@ -309,7 +309,7 @@ def test_a_symlinked_blog_repo_argument_is_refused(engine: Engine) -> None:
     link.symlink_to(engine.blog)
     engine.blog = link
     rc, payload, _ = engine.run("sync-verifier")
-    assert rc == 2 and _codes(payload) == ["blog_repo_is_symlink"]
+    assert (rc, payload["status"], _codes(payload)) == (1, "fail", ["blog_repo_is_symlink"])
 
 
 def _copy_is_a_symlink(e: Engine) -> Path:

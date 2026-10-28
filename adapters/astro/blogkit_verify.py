@@ -82,7 +82,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 VERIFIER_VERSION = "2.3.1-kit.2"
-SELF_DIGEST = {"sha256": "173b8c1f9b1550df54fdd5e738af54702f1f56794aa5c35e5a4a92d19a809820"}
+SELF_DIGEST = {"sha256": "c0ad16aa4d615c9633bdd62f4090f65ac073db43835cbd479e61ad69cc4f3ff7"}
 
 HASH_ALGO = "blogkit-content-v1"
 HASH_HEADER = b"blogkit-content-v1\n"
@@ -760,8 +760,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.repo and Path(args.repo).is_symlink():
-        print(json.dumps({"status": "error", "errors": [{"code": "repo_is_symlink", "path": ""}]}, indent=2))
-        return 2
+        print(json.dumps({"status": "fail", "errors": [{"code": "repo_is_symlink", "path": ""}]}, indent=2))
+        return 1
     root = Path(args.repo or Path.cwd()).resolve()
     report = {"status": "fail", "mode": "dist" if args.dist else "source", "ci": args.ci,
               "verifier_version": VERIFIER_VERSION}
