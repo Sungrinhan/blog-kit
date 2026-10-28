@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from test_blogkit_cli import EVIDENCE, REAL_GIT, SLUG, Engine, _commit_assets, _git, _learning, _no_leak, _review, _terms_file
+from test_blogkit import EVIDENCE, REAL_GIT, SLUG, Engine, _commit_assets, _git, _learning, _no_leak, _review, _terms_file
 
 SITE = os.environ.get("BLOGKIT_SITE_REPO", "")
 BUILD_TIMEOUT = 900
