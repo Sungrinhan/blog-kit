@@ -619,8 +619,18 @@ def _sitemap_lists_unknown_post(b: Blog) -> Dist:
 
 def _sitemap_url_without_page(b: Blog) -> Dist:
     dist = _published(b)
-    dist.feeds(extra_urls=[f"{SITE}/tags/astro/"])
+    (dist.root / "about/index.html").unlink()
     return dist
+
+
+def _post_page_outside_posts(where: str, path: str):
+    """A page built at another route and listed in a feed: every URL but /, /about/ and /posts/ is a post URL."""
+    def setup(b: Blog) -> Dist:
+        dist = _published(b)
+        dist.write(path.strip("/") + "/index.html", "<p>draft leaked</p>")
+        dist.feeds(**{where: [SITE + path]})
+        return dist
+    return setup
 
 
 def _with_file(relative: str):
@@ -764,6 +774,12 @@ DIST_FAILING = {
     "RSS links a post without evidence": (_rss_links_unknown_post, "dist_feed_post_without_evidence"),
     "sitemap lists a post without evidence": (_sitemap_lists_unknown_post, "dist_feed_post_without_evidence"),
     "sitemap URL with no page": (_sitemap_url_without_page, "dist_url_target_missing"),
+    "sitemap lists a page at another route": (_post_page_outside_posts("extra_urls", "/blog/ghost-post/"),
+                                              "dist_feed_post_without_evidence"),
+    "RSS links a page at another route": (_post_page_outside_posts("extra_links", "/blog/ghost-post/"),
+                                          "dist_feed_post_without_evidence"),
+    "sitemap lists a top-level page": (_post_page_outside_posts("extra_urls", "/ghost-post/"),
+                                       "dist_feed_post_without_evidence"),
     **{f"output holds {name}": (_with_file(path), "dist_private_file") for name, path in PRIVATE_OUTPUTS.items()},
     "symlinked folder in the output": (_symlinked_output_folder, "symlink_refused"),
     "symlinked file in the output": (_symlinked_output_file, "symlink_refused"),

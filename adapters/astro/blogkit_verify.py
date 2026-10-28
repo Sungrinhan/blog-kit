@@ -82,7 +82,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 VERIFIER_VERSION = "2.3.1-kit.2"
-SELF_DIGEST = {"sha256": "eb44cc61993a70911ab1d59a7e18b8cbd8ad9e99af2f3a0553a1b73c2343ebec"}
+SELF_DIGEST = {"sha256": "173b8c1f9b1550df54fdd5e738af54702f1f56794aa5c35e5a4a92d19a809820"}
 
 HASH_ALGO = "blogkit-content-v1"
 HASH_HEADER = b"blogkit-content-v1\n"
@@ -94,6 +94,7 @@ EVIDENCE_NAME = "publish-evidence.json"
 PREVIEW_VAR = "BLOGKIT_INCLUDE_DRAFTS"
 DIST_PREFIX = "dist:"
 REQUIRED_PAGES = ("index.html", "posts/index.html", "rss.xml")
+SITE_PAGES = ([], ["about"], ["posts"])  # home, /about/ and /posts/: the feed URLs that are not post URLs
 PRIVATE_FOLDERS = frozenset({INBOX_DIR, ".blogkit"})
 PRIVATE_NAMES = frozenset({EVIDENCE_NAME, "state.md", "review.md", "claims.json", "approval.json"})
 SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
@@ -669,9 +670,9 @@ def _rss_urls(dist: Path) -> list[tuple[str, str]]:
 
 
 def _check_url(source: str, url: str, origin: tuple[str, str], files: set[str], public: set[str]) -> None:
-    """Map a page URL to <path>/index.html in the output and check post URLs against public."""
+    """Map a page URL to <path>/index.html in the output; every URL but the site pages is a verified post URL."""
     segments = _url_segments(url, origin, source)
-    if len(segments) == 2 and segments[0] == "posts" and segments[1] not in public:
+    if segments not in SITE_PAGES and not (len(segments) == 2 and segments[0] == "posts" and segments[1] in public):
         raise VerifyError("dist_feed_post_without_evidence", source)
     if "/".join(segments + ["index.html"]) not in files:
         raise VerifyError("dist_url_target_missing", source)
