@@ -82,7 +82,7 @@ def load_terms() -> list[str]:
     """The normalized terms of the term list, or Blocked with a list_* code."""
     path = Path.home() / LIST_RELATIVE
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         raise Blocked("list_missing") from None
     except OSError:
@@ -127,7 +127,7 @@ def _inside(root: Path, argument: str) -> str:
 
 def _read_text(root: Path, relative: str, cap: int) -> str:
     try:
-        fd = os.open(root / relative, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(root / relative, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         raise Blocked("missing_file") from None
     except OSError:

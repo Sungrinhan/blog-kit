@@ -109,7 +109,7 @@ def _read_json(path: Path, missing: Exception, label: str):
     if not path.is_file():
         raise missing
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise Unknown(f"{label} is a symlink; not followed") from None
@@ -131,7 +131,7 @@ def _read_capped(path: Path, missing: Exception, label: str, cap: int) -> bytes:
     if path.is_dir():
         raise Fail(f"{label} is not a regular file")
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         raise missing from None
     except OSError:

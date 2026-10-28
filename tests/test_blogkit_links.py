@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import contextlib
 import io
+import os
+import signal
 import socket
 import sys
 import urllib.error
@@ -298,6 +301,20 @@ def test_the_exception_list_is_read_in_the_upstream_format(links, tmp_path: Path
     assert allowed == {"https://site.example/a", "http://other.example/"}
 
 
+@contextlib.contextmanager
+def _deadline(seconds: int):
+    """Interrupt a call that blocks (opening a FIFO with no writer) instead of hanging the run."""
+    def expired(signum, frame):
+        raise TimeoutError("still blocked")
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def test_no_exception_list_means_none_allowed(links, tmp_path: Path) -> None:
     assert links.load_exceptions(tmp_path) == set()
 
@@ -315,10 +332,11 @@ def _symlinked_list(folder: Path) -> None:
     (lambda f: (f / "external-links.allowed").write_text("https://a.example/\nftp://b.example/\n"),
      "exceptions_invalid", 2),
     (lambda f: (f / "external-links.allowed").mkdir(), "exceptions_unreadable", None),
-], ids=["symlink", "over 64KB", "not utf-8", "bad entry", "folder"])
+    (lambda f: os.mkfifo(f / "external-links.allowed"), "exceptions_unreadable", None),
+], ids=["symlink", "over 64KB", "not utf-8", "bad entry", "folder", "FIFO"])
 def test_an_unusable_exception_list_is_refused(links, tmp_path: Path, setup, code: str, line) -> None:
     setup(tmp_path)
-    with pytest.raises(links.LinkError) as caught:
+    with pytest.raises(links.LinkError) as caught, _deadline(5):
         links.load_exceptions(tmp_path)
     assert (caught.value.code, caught.value.line) == (code, line)
     assert "example" not in str(caught.value)

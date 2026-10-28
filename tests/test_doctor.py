@@ -350,6 +350,7 @@ FAILING = {
     "verifier copy is a symlink": (_copy_symlink, "i_verifier_copy", "fail"),
     "verifier copy is a folder": (
         lambda w: (w.copy.unlink(), w.copy.mkdir()), "i_verifier_copy", "fail"),
+    "verifier copy is a FIFO": (lambda w: (w.copy.unlink(), os.mkfifo(w.copy)), "i_verifier_copy", "fail"),
     "installed canonical verifier missing": (lambda w: w.canonical.unlink(), "i_verifier_copy", "unknown"),
 }
 

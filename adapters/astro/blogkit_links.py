@@ -70,7 +70,7 @@ def load_exceptions(folder: Path) -> set[str]:
     preflight = _preflight()
     path = folder / preflight.EXTERNAL_LINKS_ALLOWED_FILE
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         return set()
     except OSError:
