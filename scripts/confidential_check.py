@@ -29,6 +29,14 @@ decoded, and any unexpected failure, blocks as "could not check".
 Output is one JSON object with fixed codes and categories only. Terms never
 appear in it. Exit 0 when the result is pass, 1 when it blocks.
 
+Other modules load this file from the install path and call the same checks:
+scan_text(data, terms) checks bytes (strict UTF-8) or text the caller already
+read and decided is text, whatever its extension, and returns categories and
+line numbers only; scan uses it for every file. terms_digest(terms) and
+list_digest() give the SHA-256 hex of the normalized terms (NFC, casefold,
+deduplicated, sorted, joined by newlines), so comments, blank lines, order
+and case do not change it; a missing or empty list blocks instead.
+
 Usage:
     python3 confidential_check.py list
     python3 confidential_check.py scan [--root DIR] FILE [FILE ...]
@@ -38,6 +46,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import ipaddress
 import json
@@ -107,6 +116,23 @@ def load_terms() -> list[str]:
     return terms
 
 
+def terms_digest(terms: list[str]) -> str:
+    """SHA-256 hex of the normalized terms, deduplicated and sorted, joined by newlines.
+
+    Comments, blank lines, order, case and duplicates do not change it, so
+    two machines compare lists without sharing them. No terms blocks.
+    """
+    unique = sorted({_normal(term) for term in terms if term})
+    if not unique:
+        raise Blocked("list_empty")
+    return hashlib.sha256("\n".join(unique).encode("utf-8")).hexdigest()
+
+
+def list_digest() -> str:
+    """terms_digest of the term list, or Blocked with a list_* code."""
+    return terms_digest(load_terms())
+
+
 def _inside(root: Path, argument: str) -> str:
     """The root-relative POSIX path of a file argument, refusing escapes and symlinks."""
     path = Path(argument)
@@ -125,7 +151,7 @@ def _inside(root: Path, argument: str) -> str:
     return path.as_posix()
 
 
-def _read_text(root: Path, relative: str, cap: int) -> str:
+def _read_bytes(root: Path, relative: str, cap: int) -> bytes:
     try:
         fd = os.open(root / relative, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
@@ -139,10 +165,7 @@ def _read_text(root: Path, relative: str, cap: int) -> str:
         data = handle.read(cap + 1)
     if len(data) > cap:
         raise Blocked("file_too_large")
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        raise Blocked("not_utf8") from None
+    return data
 
 
 def _private_ip(line: str) -> bool:
@@ -160,6 +183,29 @@ def heuristic_categories(line: str) -> list[str]:
     line = unicodedata.normalize("NFC", line)
     found = ["private_ip"] if _private_ip(line) else []
     return found + [category for category, pattern in HEURISTICS if pattern.search(line)]
+
+
+def scan_text(data: bytes | str, terms: list[str]) -> dict:
+    """Term matches (blocks) and heuristic warnings in text the caller already read.
+
+    The caller decides that the data is text (any extension: md, svg, json,
+    yaml) and applies its own size cap; bytes are decoded as strict UTF-8 or
+    Blocked("not_utf8"). terms comes from load_terms(). The result holds
+    {"category", "line"} entries only, never a term or a line.
+    """
+    if isinstance(data, bytes):
+        try:
+            data = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Blocked("not_utf8") from None
+    blocks: list[dict] = []
+    warnings: list[dict] = []
+    for number, line in enumerate(data.split("\n"), 1):
+        normal = _normal(line)
+        if any(term in normal for term in terms):
+            blocks.append({"category": "confidential_term", "line": number})
+        warnings += [{"category": category, "line": number} for category in heuristic_categories(line)]
+    return {"blocks": blocks, "warnings": warnings}
 
 
 def scan_files(root: Path, arguments: list[str]) -> dict:
@@ -186,16 +232,12 @@ def scan_files(root: Path, arguments: list[str]) -> dict:
             errors.append({"code": "unsupported_type", "file": relative})
             continue
         try:
-            text = _read_text(root, relative, TEXT_CAPS[suffix])
+            found = scan_text(_read_bytes(root, relative, TEXT_CAPS[suffix]), terms)
         except Blocked as exc:
             errors.append({"code": exc.code, "file": relative})
             continue
-        for number, line in enumerate(text.split("\n"), 1):
-            normal = _normal(line)
-            if any(term in normal for term in terms):
-                blocks.append({"category": "confidential_term", "file": relative, "line": number})
-            warnings += [{"category": category, "file": relative, "line": number}
-                         for category in heuristic_categories(line)]
+        blocks += [{**block, "file": relative} for block in found["blocks"]]
+        warnings += [{**warning, "file": relative} for warning in found["warnings"]]
     if len(arguments) > MAX_FILES:
         errors.append({"code": "too_many_files", "file": ""})
     status = "block" if blocks or errors else "pass"
