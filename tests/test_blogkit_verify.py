@@ -652,6 +652,12 @@ PRIVATE_OUTPUTS = {
     "review record": "review.md",
     "claims record": "first-post/claims.json",
     "approval record": "approval.json",
+    "memo": "first-post/memo.md",
+    "prereq record": "prereq.md",
+    "interview answers": "interview.md",
+    "review result": "first-post/review.json",
+    "learning result": "learning.json",
+    "cross review result": "cross-review.md",
 }
 
 

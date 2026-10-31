@@ -8,6 +8,7 @@ Commands (each prints one JSON object and exits 1 on failure):
     status SLUG         current hash, evidence and missing records
     approve SLUG        record approval for --hash and --warnings
     publish SLUG        flip the draft line and commit the post and evidence
+    memo-check SLUG     confidential check of inbox/<slug>/memo.md into the state file
     sync-verifier       copy the installed verifier to the blog repo
 
 Every command first requires the install identity: this file must not live
@@ -17,7 +18,7 @@ sync-verifier stops there; every other command also requires the blog repo's
 verifier copy to match this install (doctor check i), so a stale copy is
 repaired with sync-verifier and nothing else, and the blog repo to be the root
 of a git work tree. Commands that change the evidence or the public copy
-(convert, check, approve, publish) hold an exclusive flock on
+(convert, check, approve, publish, memo-check) hold an exclusive flock on
 inbox/<slug>/blogkit.lock, which records the process id and host; only a lock
 left by a dead process on this host is cleared, and judging it happens under
 the flock.
@@ -84,6 +85,30 @@ running it again only commits; nothing is ever reset. status shows the current a
 records for the current hash, their warning ids and digest, and what the
 evidence still lacks.
 
+inbox/<slug>/state.md is human text around one block that only the engine
+writes: "<!-- blogkit-state v1 -->", a ```json fence and
+"<!-- /blogkit-state -->", each marker exactly once. The JSON is fixed: version
+1 and the sections memo, review_inputs, learning_inputs and cross_review, each
+null until its step runs. A second marker, broken JSON, an unknown or missing
+key or field, or a file that is not UTF-8 is state_invalid and the file is
+never rewritten; otherwise the text outside the block stays byte for byte, the
+file is at most 64 KB, symlinks are refused and saves are atomic. A missing
+file is made with four null sections on the first write.
+
+memo-check reads the memo once (a regular file, no symlink component, at
+most 256 KB, strict UTF-8) and runs the confidential check's scan_text and the
+memo digest over the same bytes, with the term list loaded once for the scan
+and its digest. A term blocks (memo_blocked, recorded as blocked). Warnings
+pass but stay unconfirmed until --confirm names the digest of that warning
+set (the sorted category:file:line ids); another digest is confirm_mismatch and
+writes nothing. The memo record holds the memo digest, the warning set digest,
+the checker version (this engine's version), the term list digest, the result
+and confirmed (true when there were no warnings). memo_cleared() is the one
+rule for whether a record clears the current memo; a change in the memo, the
+checker version or the term list voids it. The memo is read again before the
+save and a change records nothing. Output is the memo path, lines,
+categories and digests only.
+
 Output holds fixed error codes, check ids and reasons, versions,
 repo-relative paths and line numbers only. It never prints post text, external command output
 or URLs.
@@ -131,8 +156,8 @@ PREVIEW_TIMEOUT = 600.0
 MAX_LOCATIONS = 50
 # A path-shaped token followed by :<line> in external command output.
 LOCATION_RE = re.compile(r"(?P<path>[\w./@+-]*[\w@+-]\.[A-Za-z0-9]+):(?P<line>[0-9]+)")
-SLUG_COMMANDS = ("convert", "check", "status", "approve", "publish")
-LOCK_COMMANDS = ("convert", "check", "approve", "publish")
+SLUG_COMMANDS = ("convert", "check", "status", "approve", "publish", "memo-check")
+LOCK_COMMANDS = ("convert", "check", "approve", "publish", "memo-check")
 LOCK_NAME = "blogkit.lock"
 MAX_LOCK_BYTES = 4096
 
@@ -180,6 +205,25 @@ BACKUP_DIR = ".convert-backup"
 JOURNAL_NAME = "convert-journal.json"
 MAX_FOLDER_ENTRIES = 1000
 MAX_JOURNAL_BYTES = 1024 * 1024
+MAX_MEMO_BYTES = 256 * 1024
+MAX_STATE_BYTES = 64 * 1024
+STATE_VERSION = 1
+STATE_OPEN = "<!-- blogkit-state v1 -->"
+STATE_CLOSE = "<!-- /blogkit-state -->"
+STATE_FENCE_OPEN = "\n```json\n"
+STATE_FENCE_CLOSE = "\n```\n"
+STATE_BODY = "# blog-kit state\n\nThe engine writes the marked block below; text outside it is kept as is.\n\n"
+# Each section is null until its step runs, then exactly these fields.
+STATE_SECTIONS = {
+    "memo": {"digest": "hex64", "warnings_digest": "hex64", "checker_version": "version",
+             "list_digest": "hex64", "result": frozenset({"pass", "blocked"}), "confirmed": "bool"},
+    "review_inputs": {"content_hash": "hex64", "review_digest": "hex64", "interview_digest": "hex64",
+                      "claims_digest": "hex64"},
+    "learning_inputs": {"content_hash": "hex64", "learning_digest": "hex64"},
+    "cross_review": {"content_hash": "hex64", "status": frozenset({"done", "skipped", "blocked"}),
+                     "reason": "code"},
+}
+CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 JOURNAL_TARGET_KEYS = frozenset({"path", "existed", "original_digest", "new_digest", "staged", "backup"})
 
 
@@ -1161,6 +1205,8 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "approve":
             command.add_argument("--hash", required=True, help="Full content hash shown by status")
             command.add_argument("--warnings", required=True, help="Warning set digest shown by status")
+        if name == "memo-check":
+            command.add_argument("--confirm", default=None, help="Warning set digest shown by memo-check")
     sync = commands.add_parser("sync-verifier")
     sync.add_argument("--blog-repo", default=None, help="Blog repo folder (default: current folder)")
     return parser
@@ -1902,6 +1948,213 @@ def publish(blog: Path, slug: str, verifier) -> dict:
     return {"published": True, "commit": head.strip(), "resumed": resumed, "already_published": False}
 
 
+# ---------------------------------------------------------------- state file and memo-check
+
+
+def _no_duplicates(pairs: list) -> dict:
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def _code(value) -> bool:
+    return isinstance(value, str) and CODE_RE.fullmatch(value) is not None
+
+
+def _section_ok(name: str, value, verifier) -> bool:
+    """Whether one state section is null or exactly its fixed record."""
+    if value is None:
+        return True
+    fields = STATE_SECTIONS[name]
+    if not isinstance(value, dict) or set(value) != set(fields):
+        return False
+    for key, kind in fields.items():
+        item = value[key]
+        if kind == "hex64":
+            ok = verifier._hex64(item)
+        elif kind == "version":
+            ok = verifier._version(item)
+        elif kind == "bool":
+            ok = isinstance(item, bool)
+        elif kind == "code":
+            ok = item is None or _code(item)
+        else:  # a fixed set of words
+            ok = isinstance(item, str) and item in kind
+        if not ok:
+            return False
+    return True
+
+
+def validate_state(state, verifier) -> None:
+    """Raise state_invalid unless state is the fixed schema: version 1 and the four sections."""
+    if (not isinstance(state, dict) or set(state) != {"version", *STATE_SECTIONS}
+            or not verifier._is_int(state["version"]) or state["version"] != STATE_VERSION
+            or not all(_section_ok(name, state[name], verifier) for name in STATE_SECTIONS)):
+        raise CliError("state_invalid")
+
+
+def parse_state(data: bytes, verifier) -> tuple[str, str, dict]:
+    """The text before the block, the text after it and the block's JSON.
+
+    The block is STATE_OPEN, a newline, one ```json fence holding the JSON,
+    and STATE_CLOSE; each marker appears exactly once. Anything else, bytes
+    that are not UTF-8, JSON with a duplicate key or too deep to parse, and a
+    block outside the schema raise state_invalid. Only str.find and counts
+    run over the text, so a long line or an unclosed marker stays linear.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CliError("state_invalid") from None
+    if text.count(STATE_OPEN) != 1 or text.count(STATE_CLOSE) != 1:
+        raise CliError("state_invalid")
+    start = text.find(STATE_OPEN)
+    end = text.find(STATE_CLOSE)
+    inner = text[start + len(STATE_OPEN):end]
+    # A close marker before the open one leaves an empty inner text, which fails here too.
+    if not (inner.startswith(STATE_FENCE_OPEN) and inner.endswith(STATE_FENCE_CLOSE)
+            and len(inner) >= len(STATE_FENCE_OPEN) + len(STATE_FENCE_CLOSE)):
+        raise CliError("state_invalid")
+    body = inner[len(STATE_FENCE_OPEN):len(inner) - len(STATE_FENCE_CLOSE)]
+    try:
+        state = json.loads(body, object_pairs_hook=_no_duplicates)
+    except (ValueError, RecursionError):
+        raise CliError("state_invalid") from None
+    validate_state(state, verifier)
+    return text[:start], text[end + len(STATE_CLOSE):], state
+
+
+def _state_file(blog: Path, verifier, slug: str) -> tuple[str, str, dict] | None:
+    """The parsed state file, or None when there is none yet."""
+    relative = verifier.inbox_file(slug, "state")
+    refuse_symlinks(blog, relative)
+    if not os.path.lexists(blog / relative):
+        return None
+    try:
+        return parse_state(_read(verifier, blog, relative, MAX_STATE_BYTES), verifier)
+    except CliError as exc:
+        raise CliError(exc.code, exc.path or relative) from None
+
+
+def read_state(blog: Path, verifier, slug: str) -> dict:
+    """The state block of inbox/<slug>/state.md; four null sections when the file is not there."""
+    found = _state_file(blog, verifier, slug)
+    return found[2] if found else {"version": STATE_VERSION, **{name: None for name in STATE_SECTIONS}}
+
+
+def update_state(blog: Path, verifier, slug: str, section: str, value) -> dict:
+    """Set one section of the state block and save the file atomically.
+
+    The text outside the block stays byte for byte; a missing file is made
+    with STATE_BODY and four null sections first. A file that does not parse
+    is never written. Returns the new block.
+    """
+    relative = verifier.inbox_file(slug, "state")
+    if section not in STATE_SECTIONS:
+        raise CliError("state_invalid", relative)
+    found = _state_file(blog, verifier, slug)
+    before, after, state = found if found else (STATE_BODY, "\n", read_state(blog, verifier, slug))
+    state = {**state, section: value}
+    validate_state(state, verifier)
+    block = json.dumps(state, indent=2, ensure_ascii=False)
+    data = f"{before}{STATE_OPEN}{STATE_FENCE_OPEN}{block}{STATE_FENCE_CLOSE}{STATE_CLOSE}{after}".encode("utf-8")
+    if len(data) > MAX_STATE_BYTES:
+        raise CliError("state_too_large", relative)
+    path = blog / relative
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    refuse_symlinks(blog, f"{verifier.inbox_folder(slug)}/{temp.name}")
+    try:
+        temp.unlink(missing_ok=True)
+        _write_new(temp, data)
+        os.replace(temp, path)
+    except OSError:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise CliError("state_write_failed", relative) from None
+    return state
+
+
+def memo_cleared(record, memo_digest: str, checker_version: str, list_digest: str) -> bool:
+    """Whether a state memo record clears the current memo for AI context.
+
+    It must be a pass, confirmed (memo-check writes confirmed true when there
+    were no warnings, and only a matching --confirm when there were), and
+    bound to the current memo digest, checker (engine) version and term list
+    digest. A change in any one of the three voids the record. The context
+    loader uses this same rule.
+    """
+    return (isinstance(record, dict) and record.get("result") == "pass" and record.get("confirmed") is True
+            and record.get("digest") == memo_digest and record.get("checker_version") == checker_version
+            and record.get("list_digest") == list_digest)
+
+
+def _memo_bytes(blog: Path, verifier, relative: str) -> bytes:
+    refuse_symlinks(blog, relative)
+    if not os.path.lexists(blog / relative):
+        raise CliError("memo_missing", relative)
+    return _read(verifier, blog, relative, MAX_MEMO_BYTES)
+
+
+def memo_check(blog: Path, slug: str, verifier, confirm: str | None) -> dict:
+    """Check the memo once and record the result in the state file's memo section.
+
+    The memo is read once; the term check, the heuristics and the memo digest
+    all come from those bytes. A term blocks (recorded, then memo_blocked).
+    Warnings pass but stay unconfirmed until --confirm names the digest of
+    this exact warning set; another digest is confirm_mismatch and writes
+    nothing. A rerun keeps a confirmation only while the old record is valid
+    for the same memo, checker version, term list and warning set.
+    """
+    relative = verifier.inbox_file(slug, "memo")
+    data = _memo_bytes(blog, verifier, relative)
+    previous = read_state(blog, verifier, slug)["memo"]
+    try:
+        confidential = _load("blogkit_confidential", CONFIDENTIAL_PATH)
+    except Exception:  # noqa: BLE001 - could not load the checker; never print why
+        raise CliError("confidential_check_failed") from None
+    try:
+        terms = confidential.load_terms()
+        found = confidential.scan_text(data, terms)
+        list_digest = confidential.terms_digest(terms)
+    except confidential.Blocked as exc:
+        if exc.code == "not_utf8":
+            raise CliError("memo_not_utf8", relative) from None
+        raise CliError(f"confidential_{exc.code}") from None
+    except Exception:  # noqa: BLE001 - could not check; never print why
+        raise CliError("confidential_check_failed") from None
+    digest = _sha256(data)
+    version = engine_version()
+    blocks = [{"path": relative, "line": b["line"], "category": b["category"]} for b in found["blocks"]]
+    warnings = sorted({(w["line"], w["category"]) for w in found["warnings"]})
+    warnings = [{"path": relative, "line": line, "category": category} for line, category in warnings]
+    warnings_digest = verifier.warnings_digest(f"{w['category']}:{w['path']}:{w['line']}" for w in warnings)
+    result = "blocked" if blocks else "pass"
+    if blocks:
+        confirmed = False
+    elif confirm is not None:
+        if confirm != warnings_digest:
+            raise CliError("confirm_mismatch", relative, warnings_digest=warnings_digest)
+        confirmed = True
+    else:
+        # The memo digest, checker version and term list fix the warning set, so a record
+        # still valid for all three keeps its confirmation.
+        confirmed = not warnings or memo_cleared(previous, digest, version, list_digest)
+    record = {"digest": digest, "warnings_digest": warnings_digest, "checker_version": version,
+              "list_digest": list_digest, "result": result, "confirmed": confirmed}
+    if _sha256(_memo_bytes(blog, verifier, relative)) != digest:
+        raise CliError("memo_changed_during_check", relative)
+    update_state(blog, verifier, slug, "memo", record)
+    report = {"memo": relative, "result": result, "confirmed": confirmed,
+              "cleared": memo_cleared(record, digest, version, list_digest),
+              "blocks": blocks, "warnings": warnings, "warnings_digest": warnings_digest}
+    if blocks:
+        raise CliError("memo_blocked", relative, **report)
+    return report
+
+
 def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
     inbox = verifier.inbox_folder(args.slug)
     if args.command == "convert":
@@ -1918,6 +2171,8 @@ def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
         return approve(blog, args.slug, verifier, args.hash, args.warnings)
     if args.command == "publish":
         return publish(blog, args.slug, verifier)
+    if args.command == "memo-check":
+        return memo_check(blog, args.slug, verifier, args.confirm)
     raise CliError("not_implemented")
 
 

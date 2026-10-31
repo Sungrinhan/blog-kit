@@ -2316,3 +2316,385 @@ def test_assets_must_match_head_byte_for_byte(engine: Engine, change) -> None:
     _reapprove(engine)
     rc, payload, output = engine.run("publish", SLUG)
     assert rc == 1 and _codes(payload) == ["assets_not_committed"], output
+
+
+# ------------------------------------------------------------------ memo-check and the state file
+
+MEMO = f"inbox/{SLUG}/memo.md"
+STATE = f"inbox/{SLUG}/state.md"
+STATE_OPEN = "<!-- blogkit-state v1 -->"
+STATE_CLOSE = "<!-- /blogkit-state -->"
+CLEAN_MEMO = "# 가짜 메모\n\n문제와 선택을 적은 가짜 메모입니다.\n"
+# Line 3 falls in private_ip and number_unit.
+WARNING_MEMO = "# 가짜 메모\n\n가짜 서버 10.0.0.1 응답 30ms\n"
+EMPTY_DIGEST = _sha(b"")
+
+
+def _memo(engine: Engine, text: str | bytes = CLEAN_MEMO) -> Path:
+    path = engine.blog / MEMO
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text if isinstance(text, bytes) else text.encode("utf-8"))
+    return path
+
+
+def _ready_memo(engine: Engine, text: str | bytes = CLEAN_MEMO) -> Path:
+    _terms_file(engine)
+    return _memo(engine, text)
+
+
+def _state_block(engine: Engine) -> dict:
+    text = (engine.blog / STATE).read_text(encoding="utf-8")
+    inner = text.split(STATE_OPEN, 1)[1].split(STATE_CLOSE, 1)[0]
+    assert inner.startswith("\n```json\n") and inner.endswith("\n```\n")
+    return json.loads(inner[len("\n```json\n"):-len("\n```\n")])
+
+
+def _write_state(engine: Engine, block, before: str = "", after: str = "") -> bytes:
+    body = block if isinstance(block, str) else json.dumps(block, indent=2)
+    data = f"{before}{STATE_OPEN}\n```json\n{body}\n```\n{STATE_CLOSE}{after}".encode("utf-8")
+    path = engine.blog / STATE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return data
+
+
+def _confidential():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("confidential_oracle", ROOT / "scripts" / "confidential_check.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _engine_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("engine_oracle", ROOT / "adapters" / "astro" / "blogkit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+EMPTY_STATE = {"version": 1, "memo": None, "review_inputs": None, "learning_inputs": None, "cross_review": None}
+
+
+def test_a_clean_memo_passes_and_the_state_file_starts_with_four_nulls(engine: Engine) -> None:
+    memo = _ready_memo(engine)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 0, output
+    assert (payload["memo"], payload["result"], payload["confirmed"], payload["cleared"]) == (MEMO, "pass", True, True)
+    assert (payload["warnings"], payload["blocks"], payload["warnings_digest"]) == ([], [], EMPTY_DIGEST)
+    block = _state_block(engine)
+    assert {key: block[key] for key in EMPTY_STATE if key != "memo"} == {
+        "version": 1, "review_inputs": None, "learning_inputs": None, "cross_review": None}
+    assert block["memo"] == {
+        "digest": _sha(memo.read_bytes()), "warnings_digest": EMPTY_DIGEST, "checker_version": VERSION,
+        "list_digest": _confidential().terms_digest([FAKE_TERM]), "result": "pass", "confirmed": True}
+    assert not (engine.blog / f"inbox/{SLUG}/blogkit.lock").exists()
+
+
+def test_the_engine_creates_the_state_file_with_four_nulls(engine: Engine) -> None:
+    module = _engine_module()
+    verifier = _verifier()
+    (engine.blog / f"inbox/{SLUG}").mkdir(parents=True)
+    assert module.read_state(engine.blog, verifier, SLUG) == EMPTY_STATE
+    assert not (engine.blog / STATE).exists()
+    module.update_state(engine.blog, verifier, SLUG, "cross_review", None)
+    assert _state_block(engine) == EMPTY_STATE
+    assert module.read_state(engine.blog, verifier, SLUG) == EMPTY_STATE
+
+
+def test_a_term_blocks_the_memo_with_its_line_only(engine: Engine) -> None:
+    _ready_memo(engine, f"# 가짜 메모\n\n가짜 {FAKE_TERM} 이야기\n")
+    for extra in ([], ["--confirm", EMPTY_DIGEST]):
+        rc, payload, output = engine.run("memo-check", SLUG, *extra)
+        assert rc == 1 and _codes(payload) == ["memo_blocked"], output
+        assert payload["result"] == "blocked" and payload["cleared"] is False
+        assert payload["blocks"] == [{"path": MEMO, "line": 3, "category": "confidential_term"}]
+        memo = _state_block(engine)["memo"]
+        assert (memo["result"], memo["confirmed"]) == ("blocked", False)
+        assert FAKE_TERM not in output and FAKE_TERM not in (engine.blog / STATE).read_text(encoding="utf-8")
+        _no_leak(output)
+
+
+def test_warnings_need_the_person_to_confirm_that_exact_set(engine: Engine) -> None:
+    _ready_memo(engine, WARNING_MEMO)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 0, output
+    assert (payload["result"], payload["confirmed"], payload["cleared"]) == ("pass", False, False)
+    assert payload["warnings"] == [{"path": MEMO, "line": 3, "category": "number_unit"},
+                                   {"path": MEMO, "line": 3, "category": "private_ip"}]
+    digest = payload["warnings_digest"]
+    assert digest != EMPTY_DIGEST and _state_block(engine)["memo"]["confirmed"] is False
+    before = (engine.blog / STATE).read_bytes()
+
+    rc, payload, output = engine.run("memo-check", SLUG, "--confirm", "0" * 64)
+    assert rc == 1 and _codes(payload) == ["confirm_mismatch"], output
+    assert (engine.blog / STATE).read_bytes() == before
+
+    rc, payload, output = engine.run("memo-check", SLUG, "--confirm", digest)
+    assert rc == 0 and (payload["confirmed"], payload["cleared"]) == (True, True), output
+    memo = _state_block(engine)["memo"]
+    assert (memo["confirmed"], memo["warnings_digest"]) == (True, digest)
+
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 0 and (payload["confirmed"], payload["cleared"]) == (True, True), output
+    assert "10.0.0.1" not in output and "30ms" not in output
+
+
+def _one_byte(e: Engine) -> None:
+    _memo(e, WARNING_MEMO.replace("30ms", "31ms"))
+
+
+def _new_term(e: Engine) -> None:
+    _terms_file(e, f"# fake\n{FAKE_TERM}\n다른가짜어\n")
+
+
+def _old_checker(e: Engine) -> None:
+    block = _state_block(e)
+    block["memo"]["checker_version"] = "2.3.1-kit.2"
+    _write_state(e, block)
+
+
+@pytest.mark.parametrize("change", [_one_byte, _new_term, _old_checker],
+                         ids=["memo-byte", "term-list", "checker-version"])
+def test_a_changed_memo_list_or_checker_voids_the_confirmation(engine: Engine, change) -> None:
+    _ready_memo(engine, WARNING_MEMO)
+    rc, payload, _ = engine.run("memo-check", SLUG)
+    rc, payload, output = engine.run("memo-check", SLUG, "--confirm", payload["warnings_digest"])
+    assert rc == 0 and payload["cleared"] is True, output
+    change(engine)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 0 and (payload["confirmed"], payload["cleared"]) == (False, False), output
+    memo = _state_block(engine)["memo"]
+    assert (memo["confirmed"], memo["checker_version"]) == (False, VERSION)
+
+
+def test_the_cleared_rule_is_one_public_function() -> None:
+    cleared = _engine_module().memo_cleared
+    record = {"digest": "a" * 64, "warnings_digest": "b" * 64, "checker_version": VERSION,
+              "list_digest": "c" * 64, "result": "pass", "confirmed": True}
+    current = ("a" * 64, VERSION, "c" * 64)
+    assert cleared(record, *current) is True
+    assert cleared(None, *current) is False
+    for changed in (("d" * 64, VERSION, "c" * 64), ("a" * 64, "2.3.1-kit.2", "c" * 64), ("a" * 64, VERSION, "d" * 64)):
+        assert cleared(record, *changed) is False
+    assert cleared({**record, "confirmed": False}, *current) is False
+    assert cleared({**record, "result": "blocked"}, *current) is False
+
+
+def _memo_symlink(e: Engine) -> None:
+    real = e.tmp / "outside-memo.md"
+    real.write_text(CLEAN_MEMO, encoding="utf-8")
+    (e.blog / f"inbox/{SLUG}").mkdir(parents=True)
+    (e.blog / MEMO).symlink_to(real)
+
+
+def _inbox_symlink(e: Engine) -> None:
+    real = e.tmp / "outside-inbox"
+    (real / SLUG).mkdir(parents=True)
+    (real / SLUG / "memo.md").write_text(CLEAN_MEMO, encoding="utf-8")
+    (e.blog / "inbox").symlink_to(real)
+
+
+@pytest.mark.parametrize("setup, code", [
+    (lambda e: (e.blog / f"inbox/{SLUG}").mkdir(parents=True), "memo_missing"),
+    (_memo_symlink, "symlink_refused"),
+    (_inbox_symlink, "symlink_refused"),
+    (lambda e: _memo(e, "가" * (256 * 1024 // 3 + 1)), "file_too_large"),
+    (lambda e: _memo(e, b"# memo\n\xff\xfe\n"), "memo_not_utf8"),
+    (lambda e: (e.blog / MEMO).mkdir(parents=True), "not_a_regular_file"),
+], ids=["missing", "symlink", "inbox-symlink", "too-large", "not-utf8", "folder"])
+def test_an_unusable_memo_is_refused_and_nothing_is_written(engine: Engine, setup, code: str) -> None:
+    _terms_file(engine)
+    setup(engine)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 1 and _codes(payload) == [code], output
+    assert not os.path.lexists(engine.blog / STATE) or (engine.blog / "inbox").is_symlink()
+    assert not (engine.tmp / "outside-inbox" / SLUG / "state.md").exists()
+
+
+def test_a_memo_of_exactly_256_kb_is_read(engine: Engine) -> None:
+    _ready_memo(engine, "a" * (256 * 1024))
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 0 and payload["cleared"] is True, output
+
+
+def test_a_missing_term_list_stops_memo_check(engine: Engine) -> None:
+    _memo(engine)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 1 and _codes(payload) == ["confidential_list_missing"], output
+    assert not (engine.blog / STATE).exists()
+
+
+def test_memo_check_keeps_the_body_outside_the_block_byte_for_byte(engine: Engine) -> None:
+    _ready_memo(engine)
+    before, after = "# 사람이 읽는 상태\n\n메모 단계: 가짜 설명\n\n", "\n\n## 끝\n가짜 본문 줄\n"
+    _write_state(engine, EMPTY_STATE, before, after)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 0, output
+    text = (engine.blog / STATE).read_text(encoding="utf-8")
+    assert text.startswith(before + STATE_OPEN) and text.endswith(STATE_CLOSE + after)
+    assert _state_block(engine)["memo"]["result"] == "pass"
+
+
+def _bad_memo(**fields) -> dict:
+    record = {"digest": "a" * 64, "warnings_digest": "b" * 64, "checker_version": VERSION,
+              "list_digest": "c" * 64, "result": "pass", "confirmed": True, **fields}
+    return {**EMPTY_STATE, "memo": {k: v for k, v in record.items() if v is not ...}}
+
+
+def _raw_state(text: str):
+    def change(e: Engine) -> None:
+        (e.blog / STATE).write_bytes(text.encode("utf-8"))
+    return change
+
+
+def _block(value):
+    return lambda e: _write_state(e, value, "# 본문\n", "\n꼬리\n")
+
+
+STATE_BREAKS = {
+    "broken-json": _block('{"version": 1,'),
+    "not-an-object": _block("[]"),
+    "duplicate-key": _block('{"version": 1, "version": 1, "memo": null, "review_inputs": null, '
+                            '"learning_inputs": null, "cross_review": null}'),
+    "two-blocks": lambda e: _write_state(e, EMPTY_STATE, "", "\n" + STATE_OPEN + "\n```json\n{}\n```\n" + STATE_CLOSE),
+    "two-open-markers": _raw_state(f"{STATE_OPEN}\n{STATE_OPEN}\n```json\n{json.dumps(EMPTY_STATE)}\n```\n{STATE_CLOSE}"),
+    "no-close-marker": _raw_state(f"{STATE_OPEN}\n```json\n{json.dumps(EMPTY_STATE)}\n```\n"),
+    "close-before-open": _raw_state(f"{STATE_CLOSE}\n```json\n{json.dumps(EMPTY_STATE)}\n```\n{STATE_OPEN}"),
+    "no-markers": _raw_state("# 사람이 쓴 상태 파일\n"),
+    "no-fence": _raw_state(f"{STATE_OPEN}\n{json.dumps(EMPTY_STATE)}\n{STATE_CLOSE}"),
+    "second-fence": _block(json.dumps(EMPTY_STATE) + "\n```\n```json\n{}"),
+    "not-utf8": lambda e: (e.blog / STATE).write_bytes(STATE_OPEN.encode() + b"\n\xff\n" + STATE_CLOSE.encode()),
+    "version-2": _block({**EMPTY_STATE, "version": 2}),
+    "version-true": _block({**EMPTY_STATE, "version": True}),
+    "missing-key": _block({k: v for k, v in EMPTY_STATE.items() if k != "cross_review"}),
+    "unknown-key": _block({**EMPTY_STATE, "extra": None}),
+    "memo-unknown-field": _block(_bad_memo(extra=1)),
+    "memo-missing-field": _block(_bad_memo(confirmed=...)),
+    "memo-bad-result": _block(_bad_memo(result="maybe")),
+    "memo-confirmed-string": _block(_bad_memo(confirmed="yes")),
+    "memo-bad-digest": _block(_bad_memo(digest="A" * 64)),
+    "memo-bad-version": _block(_bad_memo(checker_version="latest")),
+    "memo-list": _block({**EMPTY_STATE, "memo": []}),
+    "review-bad": _block({**EMPTY_STATE, "review_inputs": {"content_hash": "a" * 64}}),
+    "learning-bad": _block({**EMPTY_STATE, "learning_inputs": {"content_hash": "a" * 64, "learning_digest": 1}}),
+    "cross-bad-status": _block({**EMPTY_STATE, "cross_review": {"content_hash": "a" * 64, "status": "maybe",
+                                                                 "reason": None}}),
+    "cross-bad-reason": _block({**EMPTY_STATE, "cross_review": {"content_hash": "a" * 64, "status": "skipped",
+                                                                 "reason": "Not A Code"}}),
+}
+
+
+@pytest.mark.parametrize("change", STATE_BREAKS.values(), ids=STATE_BREAKS.keys())
+def test_a_broken_state_file_stops_memo_check_and_is_kept(engine: Engine, change) -> None:
+    _ready_memo(engine)
+    change(engine)
+    before = (engine.blog / STATE).read_bytes()
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 1 and _codes(payload) == ["state_invalid"], output
+    assert (engine.blog / STATE).read_bytes() == before
+
+
+def test_every_state_section_accepts_its_full_record(engine: Engine) -> None:
+    _ready_memo(engine)
+    full = {**EMPTY_STATE,
+            "review_inputs": {"content_hash": "a" * 64, "review_digest": "b" * 64, "interview_digest": "c" * 64,
+                              "claims_digest": "d" * 64},
+            "learning_inputs": {"content_hash": "a" * 64, "learning_digest": "e" * 64},
+            "cross_review": {"content_hash": "a" * 64, "status": "skipped", "reason": "codex_missing"}}
+    _write_state(engine, full)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 0, output
+    block = _state_block(engine)
+    assert {k: v for k, v in block.items() if k != "memo"} == {k: v for k, v in full.items() if k != "memo"}
+
+
+@pytest.mark.parametrize("setup", [
+    lambda e: (e.blog / STATE).symlink_to(e.tmp / "outside-state.md"),
+    lambda e: (e.blog / STATE).write_bytes(b"a" * (64 * 1024 + 1)),
+], ids=["symlink", "too-large"])
+def test_an_unusable_state_file_is_refused(engine: Engine, setup) -> None:
+    _ready_memo(engine)
+    (engine.tmp / "outside-state.md").write_bytes(b"outside\n")
+    setup(engine)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 1 and _codes(payload) in (["symlink_refused"], ["file_too_large"]), output
+    assert (engine.tmp / "outside-state.md").read_bytes() == b"outside\n"
+
+
+@pytest.mark.parametrize("text", [
+    STATE_OPEN + "\n```json\n" + "a" * (64 * 1024 - 40),
+    STATE_OPEN + "\n```json\n" + "[" * 32000 + "]" * 32000 + "\n```\n" + STATE_CLOSE,
+    "<!-- blogkit-state " * (64 * 1024 // 20),
+    "`" * (64 * 1024 - 100) + STATE_OPEN,
+], ids=["unclosed-long-line", "deep-nesting", "repeated-prefix", "backtick-run"])
+def test_the_state_parser_stays_fast_on_worst_case_input(engine: Engine, text: str) -> None:
+    _ready_memo(engine)
+    (engine.blog / STATE).write_bytes(text.encode("utf-8"))
+    engine.timeout = 20
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 1 and _codes(payload) == ["state_invalid"], output
+
+
+def test_memo_check_refuses_a_held_lock(engine: Engine) -> None:
+    _ready_memo(engine)
+    lock = _lock(engine)
+    held = json.dumps({"pid": os.getpid(), "host": socket.gethostname()})
+    lock.write_text(held)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert rc == 1 and _codes(payload) == ["slug_locked"], output
+    assert lock.read_text() == held and not (engine.blog / STATE).exists()
+
+
+def test_memo_check_prints_no_term_or_planted_secret(engine: Engine) -> None:
+    _ready_memo(engine, f"{FAKE_TERM}\n" + WARNING_MEMO)
+    for extra in ([], ["--confirm", "0" * 64]):
+        for failing in (None, f"fatal: {PLANTED} at {PLANTED_URL}\n"):
+            engine.git_failure = failing
+            rc, payload, output = engine.run("memo-check", SLUG, *extra)
+            assert payload, output
+            _no_leak(output)
+            assert FAKE_TERM not in output and "10.0.0.1" not in output
+    text = (engine.blog / STATE).read_text(encoding="utf-8")
+    _no_leak(text)
+    assert FAKE_TERM not in text and "10.0.0.1" not in text
+
+
+MEMO_EDIT = '''\
+import os, runpy, sys
+
+cli = sys.argv[1]
+real_open = os.open
+opened = 0
+
+
+def edit_on_reread(path, *args, **kwargs):
+    global opened
+    if str(path).endswith("/memo.md"):
+        opened += 1
+        if opened == 2:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write("edited between the check and the save\\n")
+    return real_open(path, *args, **kwargs)
+
+
+os.open = edit_on_reread
+sys.argv = [cli, *sys.argv[2:]]
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
+def test_a_memo_changed_before_the_save_records_nothing(engine: Engine) -> None:
+    _ready_memo(engine)
+    script = engine.tmp / "memo-edit.py"
+    script.write_text(MEMO_EDIT)
+    wrapper = engine.tmp / "run-memo-edit.py"
+    wrapper.write_text(
+        "import runpy, sys\n"
+        f"sys.argv = [{str(script)!r}, {str(engine.cli)!r}, *sys.argv[1:]]\n"
+        f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    rc, payload, output = engine.run("memo-check", SLUG, script=wrapper)
+    assert rc == 1 and _codes(payload) == ["memo_changed_during_check"], output
+    assert not (engine.blog / STATE).exists()

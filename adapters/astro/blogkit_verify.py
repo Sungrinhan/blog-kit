@@ -43,8 +43,9 @@ site the deploy command is about to upload:
   is a post URL, names a verified public post; sub-sitemaps are root
   sitemap-<number>.xml files followed one level deep; XML that is not
   UTF-8 or has a DOCTYPE or entity declaration is refused
-- no inbox/ or .blogkit/ folder, evidence file, review, state, claims or
-  approval record, or .md/.mdx draft source ships
+- no inbox/ or .blogkit/ folder, no file named like a fixed inbox file
+  (evidence, memo, state, prereq, interview, claims, review, learning, cross
+  review), review.md or approval record, and no .md/.mdx draft source ships
 
 --ci is the strict mode for CI and WORKERS_CI deploys: the preview switch
 fails even when set to an empty or "0" value.
@@ -82,7 +83,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 VERIFIER_VERSION = "2.3.1-kit.3"
-SELF_DIGEST = {"sha256": "26df0ccafad537a1c6aade56c3b2cde4a96b69debba143e380ed003d2cc419ae"}
+SELF_DIGEST = {"sha256": "4f8a0372597561d745a9f8bd96fef5eb7ca9a86c5b57331b3a8d1e50af31ccda"}
 
 HASH_ALGO = "blogkit-content-v1"
 HASH_HEADER = b"blogkit-content-v1\n"
@@ -109,7 +110,8 @@ DIST_PREFIX = "dist:"
 REQUIRED_PAGES = ("index.html", "posts/index.html", "rss.xml")
 SITE_PAGES = ([], ["about"], ["posts"])  # home, /about/ and /posts/: the feed URLs that are not post URLs
 PRIVATE_FOLDERS = frozenset({INBOX_DIR, ".blogkit"})
-PRIVATE_NAMES = frozenset({EVIDENCE_NAME, "state.md", "review.md", "claims.json", "approval.json"})
+# Every fixed inbox file name never ships, wherever it lands in the deploy output.
+PRIVATE_NAMES = frozenset({*INBOX_FILES.values(), "review.md", "approval.json"})
 SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 SUB_SITEMAP_RE = re.compile(r"sitemap-[0-9]+\.xml")
 DOCTYPE_RE = re.compile(rb"<!(?:DOCTYPE|ENTITY)", re.IGNORECASE)
@@ -180,9 +182,11 @@ def _read_capped(root: Path, relative: str, cap: int) -> bytes:
         raise VerifyError("missing_file", relative) from None
     except OSError:
         raise VerifyError("unreadable_file", relative) from None
+    # Judge the open fd before wrapping it: a folder cannot be wrapped for reading.
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise VerifyError("not_a_regular_file", relative)
     with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            raise VerifyError("not_a_regular_file", relative)
         data = handle.read(cap + 1)
     if len(data) > cap:
         raise VerifyError("file_too_large", relative)
