@@ -1385,7 +1385,8 @@ def test_recovery_that_cannot_be_judged_changes_nothing(engine: Engine, count: i
 @pytest.mark.parametrize("command", [
     ["check", SLUG], ["status", SLUG], ["publish", SLUG],
     ["approve", SLUG, "--hash", "0" * 64, "--warnings", "0" * 64], ["record-review", SLUG],
-], ids=["check", "status", "publish", "approve", "record-review"])
+    ["record-learning", SLUG],
+], ids=["check", "status", "publish", "approve", "record-review", "record-learning"])
 def test_other_commands_refuse_an_interrupted_slug(engine: Engine, command: list[str]) -> None:
     _stopped_reconvert(engine, 5)
     before = _tree(engine)
@@ -1951,14 +1952,33 @@ def test_the_preview_build_replaces_an_old_preview_and_leaves_dist_alone(engine:
 # ------------------------------------------------------------------ approve and publish
 
 
+LEARNING = f"inbox/{SLUG}/learning.json"
+
+
+def _question(number: int, kind: str = "concept", verdict: str = "match", **extra) -> dict:
+    return {"id": f"Q-{number}", "kind": kind, "question": "가짜 질문입니까?", "answer": "가짜 답입니다.",
+            "verdict": verdict, **extra}
+
+
+def _learning_doc(engine: Engine, questions=None, **override) -> dict:
+    """A learning result for the current hash: one concept and one counter question by default."""
+    questions = [_question(1), _question(2, "counter")] if questions is None else questions
+    doc = {"content_hash": _verifier().content_hash(engine.blog, SLUG), "questions": list(questions)}
+    doc.update(override)
+    return doc
+
+
+def _write_learning(engine: Engine, doc) -> None:
+    data = doc if isinstance(doc, (bytes, str)) else json.dumps(doc, ensure_ascii=False)
+    (engine.blog / LEARNING).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+
 def _learning(engine: Engine, passed: bool = True) -> None:
-    """The M2c learning check's record for the current hash, written by the test in its place."""
-    evidence = _evidence(engine)
-    current = _verifier().content_hash(engine.blog, SLUG)
-    assert evidence["content_hash"] == current
-    evidence["records"] = [r for r in evidence["records"] if r["kind"] != "learning"] + [
-        {"kind": "learning", "passed": passed, "content_hash": current, "engine_version": VERSION}]
-    _write_evidence(engine, evidence)
+    """The learning step through the engine: a learning result for the current hash, record-learning."""
+    verdict = "match" if passed else "misconception"
+    _write_learning(engine, _learning_doc(engine, [_question(1), _question(2, "counter", verdict)]))
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert rc == 0 and payload["passed"] is passed, output
 
 
 def _checked(engine: Engine) -> dict:
@@ -2295,7 +2315,8 @@ def test_a_failed_commit_is_finished_by_running_publish_again(engine: Engine) ->
 
 
 ALL_COMMANDS = [["convert", SLUG], ["check", SLUG], ["status", SLUG], ["approve", SLUG, "--hash", "0" * 64,
-                "--warnings", "0" * 64], ["publish", SLUG], ["record-review", SLUG], ["sync-verifier"]]
+                "--warnings", "0" * 64], ["publish", SLUG], ["record-review", SLUG], ["record-learning", SLUG],
+                ["sync-verifier"]]
 
 
 def test_no_command_prints_planted_secrets_on_the_normal_or_failing_path(engine: Engine) -> None:
@@ -3107,3 +3128,331 @@ def test_record_review_prints_no_finding_or_claim_text(engine: Engine) -> None:
         text = (engine.blog / relative).read_text(encoding="utf-8")
         _no_leak(text)
         assert FAKE_TERM not in text
+
+
+# ------------------------------------------------------------------ record-learning and the learning inputs
+
+
+def _learnable(engine: Engine) -> None:
+    """Converted, reviewed and checked through all six gates, with no learning result yet."""
+    _checkable(engine)
+    _review(engine)
+    rc, _, output = engine.run("check", SLUG)
+    assert rc == 0, output
+
+
+def _learning_records(engine: Engine) -> list[dict]:
+    return [r for r in _evidence(engine)["records"] if r["kind"] == "learning"]
+
+
+def _approval_records(engine: Engine) -> list[dict]:
+    return [r for r in _evidence(engine)["records"] if r["kind"] == "approval"]
+
+
+def test_record_learning_computes_passed_and_binds_the_result(engine: Engine) -> None:
+    _learnable(engine)
+    _write_learning(engine, _learning_doc(engine, [_question(1), _question(2, "counter", "stance_changed"),
+                                                   _question(3, "concept")]))
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+    current = _verifier().content_hash(engine.blog, SLUG)
+    assert (payload["content_hash"], payload["passed"], payload["changed"]) == (current, True, True)
+    assert _learning_records(engine) == [{"kind": "learning", "passed": True, "content_hash": current,
+                                          "engine_version": VERSION}]
+    _verifier().validate_evidence(_evidence(engine))
+    assert _state_block(engine)["learning_inputs"] == {"content_hash": current,
+                                                       "learning_digest": _file_sha(engine, LEARNING)}
+    assert not (engine.blog / LOCK).exists()
+    rc, status, output = engine.run("status", SLUG)
+    assert rc == 0 and status["missing"] == ["approval_missing"], output
+
+
+@pytest.mark.parametrize("verdict", ["factual_error", "misconception"])
+def test_a_remaining_error_records_a_failed_learning_check_that_approve_refuses(engine: Engine, verdict: str) -> None:
+    _learnable(engine)
+    _write_learning(engine, _learning_doc(engine, [_question(1, verdict=verdict), _question(2, "counter")]))
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert (rc, payload["passed"], payload["changed"]) == (0, False, True), output
+    assert [r["passed"] for r in _learning_records(engine)] == [False]
+    rc, status, output = engine.run("status", SLUG)
+    assert status["missing"] == ["learning_not_passed", "approval_missing"], output
+    before = _evidence(engine)
+    rc, payload, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 1 and _codes(payload) == ["evidence_incomplete"] and "learning_not_passed" in payload["missing"]
+    assert _evidence(engine) == before
+
+
+def _learning_change(**override):
+    def change(e: Engine) -> None:
+        _write_learning(e, {**_learning_doc(e), **override})
+    return change
+
+
+def _questions(*questions):
+    return _learning_change(questions=list(questions))
+
+
+def _bad_question(**fields):
+    question = {k: v for k, v in {**_question(2, "counter"), **fields}.items() if v is not ...}
+    return _questions(_question(1), question)
+
+
+LEARNING_REFUSALS = {
+    "no-questions": (_questions(), "learning_invalid"),
+    "one-question": (_questions(_question(1)), "learning_invalid"),
+    "no-counter": (_questions(_question(1), _question(2)), "learning_invalid"),
+    "no-concept": (_questions(_question(1, "counter"), _question(2, "counter")), "learning_invalid"),
+    "missing-id": (_bad_question(id=...), "learning_invalid"),
+    "empty-id": (_bad_question(id=""), "learning_invalid"),
+    "id-not-string": (_bad_question(id=2), "learning_invalid"),
+    "duplicate-id": (_bad_question(id="Q-1"), "learning_invalid"),
+    "empty-answer": (_bad_question(answer=""), "learning_invalid"),
+    "blank-answer": (_bad_question(answer="  \n"), "learning_invalid"),
+    "missing-answer": (_bad_question(answer=...), "learning_invalid"),
+    "empty-question": (_bad_question(question=""), "learning_invalid"),
+    "unknown-verdict": (_bad_question(verdict="partly"), "learning_invalid"),
+    "verdict-korean": (_bad_question(verdict="일치"), "learning_invalid"),
+    "unknown-kind": (_bad_question(kind="trivia"), "learning_invalid"),
+    "question-extra-field": (_bad_question(passed=True), "learning_invalid"),
+    "top-total-field": (_learning_change(passed=True), "learning_invalid"),
+    "missing-hash": (lambda e: _write_learning(e, {"questions": _learning_doc(e)["questions"]}), "learning_invalid"),
+    "hash-not-hex": (_learning_change(content_hash="A" * 64), "learning_invalid"),
+    "questions-not-list": (_learning_change(questions={}), "learning_invalid"),
+    "question-not-object": (_questions(_question(1), _question(2, "counter"), "Q-3"), "learning_invalid"),
+    "too-many": (_questions(_question(1, "counter"), *[_question(n) for n in range(2, 22)]), "learning_invalid"),
+    "not-json": (lambda e: _write_learning(e, "{not json"), "learning_invalid"),
+    "not-utf8": (lambda e: _write_learning(e, b'{"content_hash": "\xff"}'), "learning_invalid"),
+    "duplicate-key": (lambda e: _write_learning(e, '{"questions": [], "questions": []}'), "learning_invalid"),
+    "list": (lambda e: _write_learning(e, "[]"), "learning_invalid"),
+    "too-large": (lambda e: _write_learning(e, "a" * (64 * 1024 + 1)), "file_too_large"),
+    "symlink": (_symlink(LEARNING), "symlink_refused"),
+    "folder": (lambda e: ((e.blog / LEARNING).unlink(), (e.blog / LEARNING).mkdir()), "not_a_regular_file"),
+    "missing": (_remove(LEARNING), "learning_file_missing"),
+    "stale": (_learning_change(content_hash="f" * 64), "learning_stale"),
+}
+
+
+@pytest.mark.parametrize("change,code", LEARNING_REFUSALS.values(), ids=LEARNING_REFUSALS.keys())
+def test_record_learning_refusals_leave_evidence_and_state_alone(engine: Engine, change, code: str) -> None:
+    _learnable(engine)
+    _learning(engine)
+    change(engine)
+    before = _snapshot(engine)
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert rc == 1 and payload["errors"] == [{"code": code, "path": LEARNING}], output
+    assert _snapshot(engine) == before
+    _no_leak(output)
+
+
+def test_twenty_questions_are_accepted(engine: Engine) -> None:
+    _learnable(engine)
+    _write_learning(engine, _learning_doc(engine, [_question(1, "counter"), *[_question(n) for n in range(2, 21)]]))
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert (rc, payload["passed"]) == (0, True), output
+
+
+def _unchecked(e: Engine) -> None:
+    _checkable(e)
+    _review(e)
+
+
+def _reviewed_with_p0(e: Engine) -> None:
+    _checkable(e)
+    _review(e, p0=1)
+    rc, _, output = e.run("check", SLUG)
+    assert rc == 1, output
+
+
+def _failed_gate_3(e: Engine) -> None:
+    _checkable(e)
+    _review(e)
+    e.astro_exit = 1
+    rc, _, output = e.run("check", SLUG)
+    assert rc == 1, output
+
+
+@pytest.mark.parametrize("setup", [_checkable, _unchecked, _reviewed_with_p0, _failed_gate_3],
+                         ids=["no-review", "no-check", "review-p0", "gate-failed"])
+def test_learning_before_a_clean_review_and_gates_is_refused(engine: Engine, setup) -> None:
+    setup(engine)
+    _write_learning(engine, _learning_doc(engine))
+    before = _snapshot(engine)
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert rc == 1 and _codes(payload) == ["learning_prerequisite_missing"], output
+    assert payload["missing"], output
+    assert _snapshot(engine) == before
+
+
+@pytest.mark.parametrize("change", INPUT_CHANGES.values(), ids=INPUT_CHANGES.keys())
+def test_a_review_input_changed_after_the_review_blocks_record_learning(engine: Engine, change) -> None:
+    _learnable(engine)
+    _write_learning(engine, _learning_doc(engine))
+    change(engine)
+    before = _snapshot(engine)
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert rc == 1 and _codes(payload) == ["review_inputs_changed"], output
+    assert _snapshot(engine) == before
+
+
+def test_the_same_learning_result_again_changes_nothing_and_keeps_approval(engine: Engine) -> None:
+    _approved(engine)
+    before = _snapshot(engine)
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert (rc, payload["changed"], payload["passed"]) == (0, False, True), output
+    assert _snapshot(engine) == before
+    rc, status, output = engine.run("status", SLUG)
+    assert status["missing"] == [], output
+
+
+def test_another_answer_with_the_same_passed_drops_the_approval(engine: Engine) -> None:
+    status = _approved(engine)
+    learning_before = _learning_records(engine)
+    _write_learning(engine, _learning_doc(engine, [_question(1, answer="다르게 고친 가짜 답"), _question(2, "counter")]))
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert (rc, payload["changed"], payload["passed"]) == (0, True, True), output
+    assert _learning_records(engine) == learning_before and _approval_records(engine) == []
+    assert _state_block(engine)["learning_inputs"] == {"content_hash": status["content_hash"],
+                                                       "learning_digest": _file_sha(engine, LEARNING)}
+    rc, status, output = engine.run("status", SLUG)
+    assert status["missing"] == ["approval_missing"], output
+
+
+def test_a_learning_result_changed_after_recording_blocks_status_and_approve(engine: Engine) -> None:
+    status = _checked(engine)
+    _write_learning(engine, _learning_doc(engine, [_question(1, answer="나중에 바꾼 가짜 답"), _question(2, "counter")]))
+    before = _snapshot(engine)
+    rc, payload, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 1 and _codes(payload) == ["learning_inputs_changed"], output
+    assert _snapshot(engine) == before
+    rc, now, output = engine.run("status", SLUG)
+    assert rc == 0 and now["missing"] == ["learning_inputs_changed", "approval_missing"], output
+    (engine.blog / LEARNING).unlink()
+    rc, now, output = engine.run("status", SLUG)
+    assert now["missing"] == ["learning_inputs_changed", "approval_missing"], output
+
+
+def test_a_learning_record_written_without_record_learning_does_not_count(engine: Engine) -> None:
+    _learnable(engine)
+    evidence = _evidence(engine)
+    evidence["records"].append({"kind": "learning", "passed": True, "content_hash": evidence["content_hash"],
+                                "engine_version": VERSION})
+    _write_evidence(engine, evidence)
+    rc, status, output = engine.run("status", SLUG)
+    assert status["missing"] == ["learning_inputs_changed", "approval_missing"], output
+    rc, payload, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 1 and _codes(payload) == ["learning_inputs_changed"], output
+
+
+def test_a_rereview_of_the_same_hash_then_the_same_learning_result_restores_the_record(engine: Engine) -> None:
+    status = _approved(engine)
+    _write_review(engine, _review_doc(engine, [_finding(1, "P2")]))
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert (rc, payload["changed"]) == (0, True), output
+    assert _learning_records(engine) == []
+    # The state still holds the same learning digest, but the record itself is gone.
+    assert _state_block(engine)["learning_inputs"]["learning_digest"] == _file_sha(engine, LEARNING)
+    rc, _, output = engine.run("check", SLUG)
+    assert rc == 0, output
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert (rc, payload["changed"], payload["passed"]) == (0, True, True), output
+    assert _learning_records(engine) == [{"kind": "learning", "passed": True, "content_hash": status["content_hash"],
+                                          "engine_version": VERSION}]
+    rc, now, output = engine.run("status", SLUG)
+    assert now["missing"] == ["approval_missing"], output
+
+
+def test_a_stop_between_the_learning_evidence_and_the_state_is_caught_and_repaired(engine: Engine) -> None:
+    _learnable(engine)
+    status = engine.run("status", SLUG)[1]
+    _write_learning(engine, _learning_doc(engine))
+    rc, _, output = engine.run("record-learning", SLUG, script=_crash(engine, "after-replace", 1))
+    assert rc == 9, output
+    assert len(_learning_records(engine)) == 1 and _state_block(engine)["learning_inputs"] is None
+    rc, now, output = engine.run("status", SLUG)
+    assert now["missing"] == ["learning_inputs_changed", "approval_missing"], output
+    rc, payload, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 1 and _codes(payload) == ["learning_inputs_changed"], output
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert (rc, payload["changed"]) == (0, True), output
+    rc, now, output = engine.run("status", SLUG)
+    assert now["missing"] == ["approval_missing"], output
+
+
+@pytest.mark.parametrize("suffix,code,path", [
+    ("/learning.json", "input_changed_during_record", LEARNING),
+    ("/review.json", "review_inputs_changed", ""),
+    (f"/{SLUG}.md", "content_changed_during_check", POST),
+], ids=["learning", "review", "post"])
+def test_a_change_just_before_the_learning_save_records_nothing(engine: Engine, suffix: str, code: str,
+                                                                 path: str) -> None:
+    _learnable(engine)
+    _write_learning(engine, _learning_doc(engine))
+    before = _snapshot(engine)
+    rc, payload, output = engine.run("record-learning", SLUG, script=_reread_edit(engine, suffix, 2))
+    assert rc == 1 and payload["errors"] == [{"code": code, "path": path}], output
+    assert _snapshot(engine) == before
+
+
+def test_record_learning_refuses_a_held_lock(engine: Engine) -> None:
+    _learnable(engine)
+    _write_learning(engine, _learning_doc(engine))
+    before = _snapshot(engine)
+    lock = _lock(engine)
+    held = json.dumps({"pid": os.getpid(), "host": socket.gethostname()})
+    lock.write_text(held)
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert rc == 1 and _codes(payload) == ["slug_locked"], output
+    assert lock.read_text() == held and _snapshot(engine) == before
+
+
+def test_record_learning_prints_no_question_or_answer_text(engine: Engine) -> None:
+    _learnable(engine)
+    planted = [_question(1, question=PLANTED, answer=FAKE_TERM),
+               _question(2, "counter", "misconception", question=PLANTED_URL, answer=PLANTED)]
+    for extra in ({}, {"content_hash": "f" * 64}, {"note": PLANTED}):
+        _write_learning(engine, _learning_doc(engine, planted, **extra))
+        rc, payload, output = engine.run("record-learning", SLUG)
+        assert payload, output
+        _no_leak(output)
+        assert FAKE_TERM not in output
+    for relative in (EVIDENCE, STATE):
+        text = (engine.blog / relative).read_text(encoding="utf-8")
+        _no_leak(text)
+        assert FAKE_TERM not in text
+
+
+@pytest.mark.parametrize("text", [
+    "[" * 40000 + "]" * 20000,
+    '{"content_hash": "' + "a" * (64 * 1024 - 40),
+    '{"questions": [{"answer": "' + "\\u0041" * 10000 + '"}]}',
+    '{"questions": [' + '{"id": "Q", "kind": "concept"},' * 2000,
+], ids=["deep", "unclosed-long-line", "long-escapes", "repeated-prefix"])
+def test_the_learning_parser_stays_fast_on_worst_case_input(engine: Engine, text: str) -> None:
+    _learnable(engine)
+    _write_learning(engine, text)
+    engine.timeout = 20
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert rc == 1 and _codes(payload) == ["learning_invalid"], output
+
+
+def test_the_automatic_steps_leave_only_the_human_approval(engine: Engine) -> None:
+    """memo-check (warnings, then --confirm), convert, record-review, check, record-learning, status."""
+    _ready_memo(engine, WARNING_MEMO)
+    rc, payload, output = engine.run("memo-check", SLUG)
+    assert (rc, payload["cleared"]) == (0, False), output
+    rc, payload, output = engine.run("memo-check", SLUG, "--confirm", payload["warnings_digest"])
+    assert (rc, payload["cleared"]) == (0, True), output
+    (engine.blog / ".gitignore").write_text(f"{PREVIEW_DIR}/\n")
+    _draft(engine)
+    rc, _, output = engine.run("convert", SLUG)
+    assert rc == 0, output
+    _review(engine)
+    rc, _, output = engine.run("check", SLUG)
+    assert rc == 0, output
+    # cross-review (M2c-09) goes here.
+    _write_learning(engine, _learning_doc(engine))
+    rc, payload, output = engine.run("record-learning", SLUG)
+    assert (rc, payload["passed"]) == (0, True), output
+    rc, status, output = engine.run("status", SLUG)
+    assert rc == 0 and status["missing"] == ["approval_missing"], output
+    assert _state_block(engine)["memo"]["confirmed"] is True

@@ -10,6 +10,7 @@ Commands (each prints one JSON object and exits 1 on failure):
     publish SLUG        flip the draft line and commit the post and evidence
     memo-check SLUG     confidential check of inbox/<slug>/memo.md into the state file
     record-review SLUG  review record from inbox/<slug>/review.json, bound to its inputs
+    record-learning SLUG  learning record from inbox/<slug>/learning.json, bound to its digest
     sync-verifier       copy the installed verifier to the blog repo
 
 Every command first requires the install identity: this file must not live
@@ -19,7 +20,7 @@ sync-verifier stops there; every other command also requires the blog repo's
 verifier copy to match this install (doctor check i), so a stale copy is
 repaired with sync-verifier and nothing else, and the blog repo to be the root
 of a git work tree. Commands that change the evidence or the public copy
-(convert, check, approve, publish, memo-check, record-review) hold an exclusive flock on
+(convert, check, approve, publish, memo-check, record-review, record-learning) hold an exclusive flock on
 inbox/<slug>/blogkit.lock, which records the process id and host; only a lock
 left by a dead process on this host is cleared, and judging it happens under
 the flock.
@@ -130,6 +131,27 @@ interview, claims and review result digests are not the state's
 review_inputs for the current hash (review_inputs_match()), so a stop between
 the two saves is caught until record-review runs again.
 
+record-learning reads inbox/<slug>/learning.json once (the same rules, at
+most 64 KB) and checks and digests those bytes. The result is exactly
+content_hash and questions: 2 to 20 items with distinct ids, each id, kind
+(concept for a core-concept question, counter for a counterargument
+question; at least one of each), question and answer (not blank) and verdict
+(match, factual_error, misconception or stance_changed); any other field is
+learning_invalid and a result for another hash is learning_stale. It needs,
+for the current hash, gates 1 to 6 passed and a review with no P0
+(learning_prerequisite_missing) whose inputs still match
+(review_inputs_changed). The engine computes passed: every verdict is match
+or stance_changed; otherwise it records passed false. Nothing changes only
+when the evidence holds this exact learning record and the state's
+learning_inputs hold this digest, so a record a new review dropped is
+written again. Otherwise, after the hash, the learning digest and the review
+inputs are read again (a change records nothing), the evidence drops
+learning and approval and takes {kind: learning, passed, content_hash,
+engine_version}, then the state's learning_inputs are saved. status and
+approve refuse with learning_inputs_changed while a learning record's
+current learning result digest is not the state's learning_inputs for the
+current hash (learning_inputs_match()).
+
 Output holds fixed error codes, check ids and reasons, versions,
 repo-relative paths and line numbers only. It never prints post text, external command output
 or URLs.
@@ -177,8 +199,9 @@ PREVIEW_TIMEOUT = 600.0
 MAX_LOCATIONS = 50
 # A path-shaped token followed by :<line> in external command output.
 LOCATION_RE = re.compile(r"(?P<path>[\w./@+-]*[\w@+-]\.[A-Za-z0-9]+):(?P<line>[0-9]+)")
-SLUG_COMMANDS = ("convert", "check", "status", "approve", "publish", "memo-check", "record-review")
-LOCK_COMMANDS = ("convert", "check", "approve", "publish", "memo-check", "record-review")
+SLUG_COMMANDS = ("convert", "check", "status", "approve", "publish", "memo-check", "record-review",
+                 "record-learning")
+LOCK_COMMANDS = ("convert", "check", "approve", "publish", "memo-check", "record-review", "record-learning")
 LOCK_NAME = "blogkit.lock"
 MAX_LOCK_BYTES = 4096
 
@@ -260,6 +283,17 @@ REVIEW_INPUT_KEYS = frozenset({"interview_digest", "claims_digest"})
 FINDING_KEYS = frozenset({"id", "severity", "category", "location"})
 FINDING_OPTIONAL_KEYS = frozenset({"claim_ids", "interview_ids"})
 SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
+# record-learning: the learning result. kind concept is a core-concept question and counter a
+# counterargument question; verdict match, factual_error, misconception or stance_changed (the
+# answer agrees, has a factual error, shows a misconception, or reflects a changed stance).
+MAX_LEARNING_BYTES = 64 * 1024
+MAX_QUESTIONS = 20
+MIN_QUESTIONS = 2
+LEARNING_KEYS = frozenset({"content_hash", "questions"})
+QUESTION_KEYS = frozenset({"id", "kind", "question", "answer", "verdict"})
+QUESTION_KINDS = frozenset({"concept", "counter"})
+VERDICTS = frozenset({"match", "factual_error", "misconception", "stance_changed"})
+PASSING_VERDICTS = frozenset({"match", "stance_changed"})
 JOURNAL_TARGET_KEYS = frozenset({"path", "existed", "original_digest", "new_digest", "staged", "backup"})
 
 
@@ -1703,8 +1737,9 @@ def approve(blog: Path, slug: str, verifier, content_hash: str, warnings: str) -
         raise CliError("hash_mismatch")
     gaps = [gap for gap in evidence_gaps(blog, verifier, slug, evidence, current)
             if gap not in ("approval_missing", "approval_warnings_mismatch")]
-    if "review_inputs_changed" in gaps:
-        raise CliError("review_inputs_changed", missing=gaps)
+    for code in ("review_inputs_changed", "learning_inputs_changed"):
+        if code in gaps:
+            raise CliError(code, missing=gaps)
     if gaps:
         raise CliError("evidence_incomplete", missing=gaps)
     digest = verifier.warnings_digest(_gate_warnings(evidence))
@@ -2203,12 +2238,12 @@ def memo_check(blog: Path, slug: str, verifier, confirm: str | None) -> dict:
 # ---------------------------------------------------------------- record-review and the review inputs
 
 
-def _input_bytes(blog: Path, verifier, relative: str, missing: str) -> bytes:
-    """An inbox input file: a regular file, no symlink component, at most MAX_INPUT_BYTES."""
+def _input_bytes(blog: Path, verifier, relative: str, missing: str, cap: int = MAX_INPUT_BYTES) -> bytes:
+    """An inbox input file: a regular file, no symlink component, at most cap bytes."""
     refuse_symlinks(blog, relative)
     if not os.path.lexists(blog / relative):
         raise CliError(missing, relative)
-    return _read(verifier, blog, relative, MAX_INPUT_BYTES)
+    return _read(verifier, blog, relative, cap)
 
 
 def _strict_json(data: bytes, code: str, relative: str):
@@ -2319,14 +2354,42 @@ def review_inputs_match(blog: Path, verifier, slug: str, current: str) -> bool:
     return True
 
 
+def learning_inputs_match(blog: Path, verifier, slug: str, current: str) -> bool:
+    """Whether the state's learning_inputs are the current hash and the current learning result's digest.
+
+    The one rule status and approve use for a learning record: the learning
+    result must be the bytes record-learning recorded for this content hash.
+    A missing or unreadable file never matches.
+    """
+    record = read_state(blog, verifier, slug)["learning_inputs"]
+    if not isinstance(record, dict) or record.get("content_hash") != current:
+        return False
+    try:
+        data = _input_bytes(blog, verifier, verifier.inbox_file(slug, "learning"), "missing_file", MAX_LEARNING_BYTES)
+    except CliError:
+        return False
+    return record.get("learning_digest") == _sha256(data)
+
+
 def evidence_gaps(blog: Path, verifier, slug: str, evidence: dict, current: str) -> list[str]:
-    """The verifier's evidence gaps, plus review_inputs_changed for a review record whose inputs moved on."""
+    """The verifier's evidence gaps, plus review_inputs_changed and learning_inputs_changed.
+
+    review_inputs_changed comes before the review gaps when a review record's
+    inputs moved on; learning_inputs_changed comes before the approval gaps
+    when a learning record's result moved on.
+    """
     gaps = verifier.evidence_gaps(evidence, current)
-    if "content_hash_mismatch" in gaps or "review_missing" in gaps or review_inputs_match(blog, verifier, slug, current):
+    if "content_hash_mismatch" in gaps:
         return gaps
-    at = next((i for i, gap in enumerate(gaps) if not gap.startswith("gate_") and gap != "record_hash_mismatch"),
-              len(gaps))
-    return gaps[:at] + ["review_inputs_changed"] + gaps[at:]
+    if "review_missing" not in gaps and not review_inputs_match(blog, verifier, slug, current):
+        at = next((i for i, gap in enumerate(gaps) if not gap.startswith("gate_") and gap != "record_hash_mismatch"),
+                  len(gaps))
+        gaps = gaps[:at] + ["review_inputs_changed"] + gaps[at:]
+    if (any(r["kind"] == "learning" for r in evidence["records"])
+            and not learning_inputs_match(blog, verifier, slug, current)):
+        at = next((i for i, gap in enumerate(gaps) if gap.startswith("approval_")), len(gaps))
+        gaps = gaps[:at] + ["learning_inputs_changed"] + gaps[at:]
+    return gaps
 
 
 def record_review(blog: Path, slug: str, verifier) -> dict:
@@ -2384,6 +2447,91 @@ def record_review(blog: Path, slug: str, verifier) -> dict:
     return {**result, "changed": True}
 
 
+# ---------------------------------------------------------------- record-learning and the learning inputs
+
+
+def _question_ok(question) -> bool:
+    return (isinstance(question, dict) and set(question) == QUESTION_KEYS
+            and isinstance(question["id"], str) and ITEM_ID_RE.fullmatch(question["id"]) is not None
+            and isinstance(question["kind"], str) and question["kind"] in QUESTION_KINDS
+            and _text(question["question"]) and _text(question["answer"])
+            and isinstance(question["verdict"], str) and question["verdict"] in VERDICTS)
+
+
+def learning_result(data: bytes, relative: str, verifier) -> tuple[dict, bool]:
+    """The learning result and whether it passes, computed here from the verdicts.
+
+    The result is exactly content_hash and questions: MIN_QUESTIONS to
+    MAX_QUESTIONS items, each id, kind, question, answer and verdict, ids
+    distinct, at least one concept and one counter question, no blank
+    question or answer. Any other field is learning_invalid. It passes when
+    every verdict is match or stance_changed.
+    """
+    doc = _strict_json(data, "learning_invalid", relative)
+    if not isinstance(doc, dict) or set(doc) != LEARNING_KEYS or not verifier._hex64(doc["content_hash"]):
+        raise CliError("learning_invalid", relative)
+    questions = doc["questions"]
+    if (not isinstance(questions, list) or not MIN_QUESTIONS <= len(questions) <= MAX_QUESTIONS
+            or not all(map(_question_ok, questions))):
+        raise CliError("learning_invalid", relative)
+    if len({q["id"] for q in questions}) != len(questions) or {q["kind"] for q in questions} != QUESTION_KINDS:
+        raise CliError("learning_invalid", relative)
+    return doc, all(q["verdict"] in PASSING_VERDICTS for q in questions)
+
+
+def record_learning(blog: Path, slug: str, verifier) -> dict:
+    """Check the learning result and record the learning check for the current hash.
+
+    The learning result is read once and checked from those bytes; it must
+    name the current content hash (learning_stale). The current hash must
+    already have gates 1 to 6 passed and a review with no P0
+    (learning_prerequisite_missing) whose inputs are unchanged
+    (review_inputs_changed). The engine computes passed. Nothing changes
+    only when the evidence holds this exact learning record and the state's
+    learning_inputs hold this digest; a record dropped by a new review is
+    written again. Otherwise, after the hash, the learning digest and the
+    review inputs are read again (a change records nothing), the evidence
+    drops learning and approval and takes the new record, and then the
+    state's learning_inputs are saved. A stop between the two saves leaves
+    learning_inputs behind, which status and approve refuse with
+    learning_inputs_changed until record-learning runs again.
+    """
+    relative = verifier.inbox_file(slug, "learning")
+    data = _input_bytes(blog, verifier, relative, "learning_file_missing", MAX_LEARNING_BYTES)
+    learning, passed = learning_result(data, relative, verifier)
+    evidence = _load_evidence(blog, verifier, slug)
+    current = _current_hash(blog, verifier, slug)
+    if learning["content_hash"] != current:
+        raise CliError("learning_stale", relative)
+    gaps = evidence_gaps(blog, verifier, slug, evidence, current)
+    if "review_inputs_changed" in gaps:
+        raise CliError("review_inputs_changed", missing=gaps)
+    missing = [gap for gap in gaps if gap.startswith(("gate_", "review_"))
+               or gap in ("content_hash_mismatch", "record_hash_mismatch")]
+    if missing:
+        raise CliError("learning_prerequisite_missing", missing=missing)
+    inputs = {"content_hash": current, "learning_digest": _sha256(data)}
+    record = {"kind": "learning", "passed": passed, "content_hash": current, "engine_version": engine_version()}
+    result = {"content_hash": current, "passed": passed}
+    if record in evidence["records"] and read_state(blog, verifier, slug)["learning_inputs"] == inputs:
+        return {**result, "changed": False}
+    evidence["records"] = [r for r in evidence["records"] if r["kind"] not in ("learning", "approval")] + [record]
+    if _current_hash(blog, verifier, slug) != current:
+        raise CliError("content_changed_during_check", verifier.post_path_for(slug))
+    try:
+        same = _sha256(_input_bytes(blog, verifier, relative, "missing_file", MAX_LEARNING_BYTES)) == inputs[
+            "learning_digest"]
+    except CliError:
+        same = False
+    if not same:
+        raise CliError("input_changed_during_record", relative)
+    if not review_inputs_match(blog, verifier, slug, current):
+        raise CliError("review_inputs_changed")
+    _save_evidence(blog, verifier, slug, evidence)
+    update_state(blog, verifier, slug, "learning_inputs", inputs)
+    return {**result, "changed": True}
+
+
 def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
     inbox = verifier.inbox_folder(args.slug)
     if args.command == "convert":
@@ -2404,6 +2552,8 @@ def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
         return memo_check(blog, args.slug, verifier, args.confirm)
     if args.command == "record-review":
         return record_review(blog, args.slug, verifier)
+    if args.command == "record-learning":
+        return record_learning(blog, args.slug, verifier)
     raise CliError("not_implemented")
 
 
