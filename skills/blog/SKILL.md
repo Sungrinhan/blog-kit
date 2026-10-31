@@ -231,7 +231,7 @@ syntax, and template-specific structure.
 
 ## Sub-Skills
 
-Route user-facing commands by the command table above. The package contains 31 sub-skill directories plus this orchestrator; the fork adds a separate `blog-doctor` install check that is not routed here. `blog-chart` is internal-only; `blog-image` is user-facing and also callable internally by write/rewrite. Load `${CLAUDE_SKILL_DIR}/../blog/references/orchestration-details.md` for agent roles, execution flow, internal workflows, and context-loading details.
+Route user-facing commands by the command table above. The package contains 31 sub-skill directories plus this orchestrator; the fork adds a separate `blog-doctor` install check and the `blog-memo` pipeline command, which are not routed here. `blog-chart` is internal-only; `blog-image` is user-facing and also callable internally by write/rewrite. Load `${CLAUDE_SKILL_DIR}/../blog/references/orchestration-details.md` for agent roles, execution flow, internal workflows, and context-loading details.
 
 ## Agents
 

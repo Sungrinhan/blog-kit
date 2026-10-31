@@ -1,7 +1,7 @@
 {
   "name": "claude-blog",
   "displayName": "Claude Blog",
-  "description": "AI-powered blog skill suite: 33 skill directories (incl. the blog-doctor install check) and 5 agents to write, rewrite, audit, and optimize content for Google rankings and AI citations (GEO/AEO). Includes the FLOW framework, topic clusters, multilingual publishing, Google API integration, personas, fact-checking, NotebookLM research, Gemini TTS narration, image generation, and 100-point scoring.",
+  "description": "AI-powered blog skill suite: 34 skill directories (incl. blog-doctor and blog-memo) and 6 agents to write, rewrite, audit, and optimize content for Google rankings and AI citations (GEO/AEO). Includes the FLOW framework, topic clusters, multilingual publishing, Google API integration, personas, fact-checking, NotebookLM research, Gemini TTS narration, image generation, and 100-point scoring.",
   "version": "2.3.1-kit.3",
   "author": {
     "name": "AgriciDaniel",

@@ -4,8 +4,9 @@ blog-kit keeps the upstream plugin name and author, and distributes through
 its own marketplace (`claude-blog@blog-kit`) owned by the fork owner. The
 existing catalog entries, including the optional companion, stay as they are.
 LICENSE keeps the upstream copyright line and adds one fork line under it.
-Fork-owned descriptions state the shipped skill directory count; upstream
-document bodies keep the upstream count (FORK.md).
+Fork-owned descriptions state the shipped skill directory count, name the
+fork skills and state the shipped agent count; upstream document bodies keep
+the upstream count (FORK.md).
 
 Stdlib + pytest only.
 """
@@ -69,7 +70,9 @@ def test_fork_owned_descriptions_state_the_shipped_skill_count(surface: str) -> 
         text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     counts = re.findall(r"(\d+) skill directories", text)
     assert counts and set(counts) == {str(_skill_dirs())}
-    assert "blog-doctor" in text
+    assert "blog-doctor" in text and "blog-memo" in text
+    agents = re.findall(r"(\d+) (?:specialized sub)?agents", text)
+    assert agents and set(agents) == {str(len(list((ROOT / "agents").glob("*.md"))))}
 
 
 def test_router_names_the_fork_skill_it_does_not_route() -> None:

@@ -14,7 +14,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 
 - `FORK.md`: 이 문서. 업스트림 기준 커밋과 포크 변경 목록
 - `tests/test_fork_manifest.py`: 이 문서의 목록과 실제 변경(기준 대비 index와 작업 트리 각각)의 일치 검사. 얕은 clone에서만 skip, 기준 커밋이 없는 일반 clone은 실패
-- `tests/test_fork_identity.py`: 플러그인 이름·업스트림 author 유지, 포크 마켓 이름·owner와 기존 항목 유지, LICENSE 업스트림 저작권 줄 유지, 포크가 고친 설명의 스킬 폴더 수 검사
+- `tests/test_fork_identity.py`: 플러그인 이름·업스트림 author 유지, 포크 마켓 이름·owner와 기존 항목 유지, LICENSE 업스트림 저작권 줄 유지, 포크가 고친 설명의 스킬 폴더 수·포크 스킬 이름·에이전트 수 검사
 - `scripts/doctor.py`: 설치 점검. 블로그 레포가 고정한 버전과 실제 실행된 엔진(공유 설정, `claude plugin list --json`, 설치 레지스트리, 태그 커밋), 실행 경로, Python 버전, 런타임 경로를 검사해 JSON으로 출력. 확인할 수 없으면 실패. 이 블로그 레포의 설치는 레지스트리 `projectPath`로 먼저 골라 다른 레포의 project 설치와 구분하고, 런타임 경로는 기본·활성 Claude 플러그인 폴더 밖이고 폴더(또는 아직 없음)여야 함. 다른 마켓의 같은 이름 플러그인은 user 범위이거나, 레지스트리가 이 블로그 레포에 둔 project·local 설치일 때만 활성으로 봄(어느 레포 것인지 모르면 확인 불가). 설정·레지스트리 파일은 symlink를 따르지 않고 4MB까지만 읽으며, symlink인 `--blog-repo`는 거부. 설치 신원 검사(a~f)는 `identity_checks()`로 다른 설치 스크립트(엔진 CLI)가 불러 쓸 수 있고, 이때 실행 경로 검사는 부른 스크립트의 경로로 판정. 검증기 사본 검사(i)는 블로그 레포의 `scripts/blogkit_verify.py`가 symlink 아닌 일반 파일이고 설치 경로의 정본과 바이트가 같으며 머리의 버전이 설치 버전인지 보고, 엔진 CLI도 `check_verifier_copy()`로 같은 검사를 쓴다
 - `skills/blog-doctor/SKILL.md`: 설치된 설치 점검 스크립트를 실행하고 결과를 보여 주는 스킬(`/blog-doctor`). 라우터 명령 표에는 넣지 않음. 다른 스킬과 달리 `CLAUDE_BLOG_SCRIPTS_DIR` override를 따르지 않고 설치본의 스크립트만 실행한다(점검 (f)가 실행 위치를 확인하므로, override로 다른 사본을 돌리면 점검이 뜻을 잃는다)
 - `tests/test_doctor.py`: 스텁 `claude`·`git`과 임시 블로그 레포·레지스트리로 설치 점검의 통과·실패 사례와 비밀 비노출 확인
@@ -35,6 +35,9 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `agents/blog-reviewer-ko.md`: M2c 한국어 검수 에이전트(도구 Read·Grep·Glob뿐). 공개본은 경로로만 Read하고, 인터뷰 답·근거 파일은 오케스트레이터가 넘긴 펜스 본문으로만 받으며 비공개 폴더를 직접 읽지 않음. 한국어 검수 규칙을 따라 `record-review`가 받는 JSON 하나로 답하고, 내용 해시·입력 digest는 받은 값을 그대로 돌려줌. 점수 없음
 - `skills/blog-interview/references/korean-review-rules.md`: 한국어 검수 규칙. P0 네 종류(인터뷰 답 ID 없는 내 철학, 발췌가 뒷받침하지 않거나 `unconfirmed`이거나 없는 ID에 기댄 공개 사실, 대안의 부당한 약화, 회사를 특정할 수 있는 서술)와 범주 이름, 실제 뒷받침 여부로 판정, P1~P3 참고 범주, 영어 지표·점수 없음, 엔진 `review_result()`와 같은 출력 스키마와 예시. 같은 폴더의 `SKILL.md`는 M2c-13이 더하며, 그 전에는 독립 설치 스크립트가 이 폴더를 복사하지 않음(`SKILL.md` 있는 폴더만 설치)
 - `tests/test_blog_reviewer_ko.py`: S3. 에이전트 도구가 정확히 Read·Grep·Glob, 규칙 파일의 P0 네 종류 문구와 범주 이름, 출력 예시 JSON이 엔진 `review_result()`를 통과하고 P0 수가 맞음, 영어 지표·점수 키 없음, 에이전트·규칙 본문의 비공개 경로 언급은 금지 문장뿐
+- `skills/blog-memo/SKILL.md`: M2c 파이프라인 첫 독립 명령(`/blog-memo <slug>`, 라우터 명령 표에 넣지 않음). ① 메모가 없을 때만 양식을 셸 복사(`set -C`, 내용을 읽고 다시 쓰지 않음)로 만들고 사람에게 AI 세션 밖 작성과 설치 엔진의 `memo-check`(경고가 있으면 `--confirm <warnings_digest>`) 실행을 안내, ② 맥락 로더 `--bundle memo` 출력의 펜스 본문만으로 전제 지식 점검(개념 추출, 카드 있는 개념 제외, 확인 질문 2개와 원칙 적용 질문 1개, `일부`·`모름`은 카드 후보)을 하고 전제 지식 기록을 없을 때만 새로 씀. 로더가 멈추면 이유 코드를 보이고 멈춤. 엔진·로더는 `${CLAUDE_SKILL_DIR}` 기준 설치본만 실행하고 `CLAUDE_BLOG_SCRIPTS_DIR` override를 따르지 않음(엔진은 설치 신원에서만 돌고 로더는 자기 설치 경로의 모듈을 불러 씀). 비공개 폴더 직접 읽기 금지와 서브에이전트 미사용은 지시로만 막음
+- `skills/blog-memo/references/memo-template.md`: 요약 메모의 질문형 빈 양식. 일곱 항목(문제, 제약, 실제 검토한 후보(수 그대로), 선택, 당시 이유, 결과, 지금 생각)과 일반화 안내
+- `tests/test_blogkit_skills.py`: S3. 파이프라인 스킬의 frontmatter가 `blog-doctor`와 같은 키 구성, 엔진·로더를 `${CLAUDE_SKILL_DIR}` 기준 설치 경로로만 부름, 비공개 경로가 나오는 줄은 금지 문장이거나 정해진 출력 경로(`memo.md`, `prereq.md`)뿐, 양식 복사가 덮어쓰지 않음, 전제 지식 기록 형식, 양식의 일곱 항목, 라우터 문장의 포크 스킬 이름 확인. M2c-13·14가 스킬을 더해 확장
 - `docs/BLOG-KIT-UPGRADE.md`: 블로그 레포 설정 예시와 설치·업그레이드·다운그레이드 순서(재시작 뒤 `sync-verifier` → 사본 커밋 → 설치 점검), uninstall 금지, 런타임 경로 첫 전환, 보존 확인
 - `docs/BLOG-KIT-HUMAN-CHECK.md`: 두 기기 설치·전환 사람 검증 기록 양식과 단계별 기대 설치 점검 결과
 
@@ -43,9 +46,9 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 업스트림 파일을 직접 고친 곳. 업스트림 병합 때 충돌 후보다.
 
 - `.gitignore`: `/flow` 작업 폴더(`.scratch/`)와 외부 도구가 만드는 로컬 전용 Codex용 사본(`/AGENTS.md`, `/.agents/`) 제외
-- `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가. 스킬 폴더 수(33)·스크립트 수(24)와 구조도에 `blog-doctor`·`scripts/doctor.py`·`scripts/confidential_check.py`. 에이전트 수(6)와 구조도에 `blog-reviewer-ko`
-- `.claude-plugin/marketplace.json`: 마켓 이름 `blog-kit`, owner를 포크 소유자로, `claude-blog` 설명의 스킬 폴더 수를 33개로. 기존 항목(동반 플러그인 포함)은 그대로
-- `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.N`, repository·homepage를 포크 저장소로, 설명의 스킬 폴더 수를 33개(`blog-doctor` 포함)로. 이름·author는 업스트림 그대로
+- `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가. 스킬 폴더 수(34)·스크립트 수(24)와 구조도에 `blog-doctor`·`blog-memo`·`scripts/doctor.py`·`scripts/confidential_check.py`. 에이전트 수(6)와 구조도에 `blog-reviewer-ko`
+- `.claude-plugin/marketplace.json`: 마켓 이름 `blog-kit`, owner를 포크 소유자로, `claude-blog` 설명의 스킬 폴더 수를 34개(`blog-doctor`·`blog-memo` 포함)로, 에이전트 수를 6개로. 기존 항목(동반 플러그인 포함)은 그대로
+- `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.N`, repository·homepage를 포크 저장소로, 설명의 스킬 폴더 수를 34개(`blog-doctor`·`blog-memo` 포함)로, 에이전트 수를 6개로. 이름·author는 업스트림 그대로
 - `.github/ISSUE_TEMPLATE/config.yml`: 토론·보안 제보·문서 안내 URL을 포크 저장소로
 - `.github/SECURITY.md`: 보안 제보(Security Advisory) URL을 포크 저장소로
 - `CHANGELOG.md`: 맨 위에 포크 절과 포크 릴리스 항목
@@ -54,7 +57,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `README.md`: 맨 위 포크 설치 안내 블록(절차서 링크 포함). 나머지 본문은 업스트림 그대로
 - `pyproject.toml`: 버전 `2.3.1+kit.N`(PEP 440 로컬 버전), 프로젝트 URL을 포크로
 - `scripts/validate_public_release.py`: 업스트림 author 상수와 포크 배포 상수 분리, 버전 대응 규칙 `python_version()`, 독립 설치 스크립트 표면을 필수 검사에서 제외(아래 "릴리스 검사 범위 밖")
-- `skills/blog/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`. 라우팅 절에 라우팅하지 않는 포크 스킬 `blog-doctor` 한 줄
+- `skills/blog/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`. 라우팅 절에 라우팅하지 않는 포크 스킬(`blog-doctor`, `blog-memo`) 한 문장
 - `skills/blog-audio/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
 - `skills/blog-cluster/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
 - `skills/blog-flow/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
@@ -67,7 +70,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `skills/blog-translate/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
 - `skills/blog-image/scripts/setup_image_mcp.py`: 대상 선택을 `--project-dir <블로그 레포>`(그 폴더의 `.mcp.json`)와 `--global`(사용자 범위 MCP를 실제로 읽는 `~/.claude.json`, `CLAUDE_CONFIG_DIR`가 있으면 그 폴더의 `.claude.json`. 다른 키·서버 보존, 쓰는 도중 Claude Code가 고치면 다시 읽어 우리 항목만 다시 적용) 둘 중 하나로. 설치본(기본·활성 설정 폴더의 플러그인 폴더 안)에서 둘 다 없으면 오류로 멈추고 아무것도 쓰지 않음, 빈 `--project-dir`도 오류, 개발 체크아웃은 자기 루트 자동 탐색만 허용하고 실패하면 전역으로 넘어가지 않음. 설정·확인·제거가 같은 규칙. 업스트림 `--project`는 대상 없음과 같은 뜻으로 유지
 - `skills/blog-image/scripts/validate_image_setup.py`: 설정 확인도 설정 도우미의 대상 선택 규칙(`resolve_target`)을 그대로 써서 그 한 파일만 읽음(`--project-dir`·`--global`, 설치본에서 둘 다 없으면 오류). 플러그인 루트 `.mcp.json`과 예전 `~/.claude/settings.json`으로 넘어가지 않음
-- `tests/test_skill_frontmatter.py`: 스킬 폴더 수 단언을 업스트림 32개 + `blog-doctor` = 33개로, 에이전트 수 단언을 업스트림 5개 + `blog-reviewer-ko` = 6개로
+- `tests/test_skill_frontmatter.py`: 스킬 폴더 수 단언을 업스트림 32개 + `blog-doctor`·`blog-memo` = 34개(user-invocable 33개)로, 에이전트 수 단언을 업스트림 5개 + `blog-reviewer-ko` = 6개로
 - `tests/test_scripts_wave3_image.py`: 기존 전역 설정 테스트를 `~/.claude.json` 기대값과 새 함수 인자로. 임시 HOME·설치본 흉내로 대상 선택 사례(대상 없음·경로·전역·둘 다·자동 탐색 실패·성공, `--project`)를 설정·확인·제거와 설정 확인 스크립트에 대해 확인
 - `tests/test_release_safeguards.py`: 검사기 픽스처를 포크 값으로, 마켓 이름 단언을 `blog-kit`으로. 업스트림 보안 checkout 안내 필수 테스트를 포크 보안 URL·설치 스크립트 제외·author 유지 테스트로 교체
 - `tests/test_version_coherence.py`: 버전 표면 비교를 대응 규칙으로(`2.3.1-kit.N` ↔ `2.3.1+kit.N`, 접미사 없는 형식도 수용), 기준 버전을 plugin.json으로, 임시 폴더 픽스처로 일치·불일치 확인
@@ -86,7 +89,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 
 ## 업스트림 문서의 수량 문구
 
-README·`docs/`·`.github/CONTRIBUTING.md`·`brain/` 등 업스트림 문서 본문의 스킬 폴더 수("32 skill directories", "31 sub-skills")와 스크립트 수는 업스트림 기준 그대로 둔다. 포크가 덧붙인 `blog-doctor`와 `scripts/doctor.py`는 이 문서와, 포크가 이미 고친 설명(플러그인 매니페스트, 마켓 목록, `CLAUDE.md`, 라우터 SKILL.md)에만 반영한다. 업스트림 병합 때 충돌을 줄이려는 것이다.
+README·`docs/`·`.github/CONTRIBUTING.md`·`brain/` 등 업스트림 문서 본문의 스킬 폴더 수("32 skill directories", "31 sub-skills")와 스크립트 수는 업스트림 기준 그대로 둔다. 포크가 덧붙인 `blog-doctor`·`blog-memo`와 `scripts/doctor.py`는 이 문서와, 포크가 이미 고친 설명(플러그인 매니페스트, 마켓 목록, `CLAUDE.md`, 라우터 SKILL.md)에만 반영한다. 업스트림 병합 때 충돌을 줄이려는 것이다.
 
 ## 버전 체계
 
