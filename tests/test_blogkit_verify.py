@@ -871,3 +871,37 @@ def test_ci_mode_passes_a_clean_deploy_output(blog: Blog) -> None:
     blog.env.update(CI="true", WORKERS_CI="1")
     rc, payload, _ = run_dist(blog, dist.root, "--ci")
     assert (rc, payload["ci"], payload["errors"]) == (0, True, [])
+
+
+# ------------------------------------------------------------------ inbox path helpers
+
+
+@pytest.mark.parametrize("kind, name", [
+    ("evidence", "publish-evidence.json"), ("memo", "memo.md"), ("state", "state.md"),
+    ("prereq", "prereq.md"), ("interview", "interview.md"), ("claims", "claims.json"),
+    ("review", "review.json"), ("learning", "learning.json"), ("cross_review", "cross-review.md"),
+])
+def test_inbox_file_paths_come_from_one_helper(kind: str, name: str) -> None:
+    assert V.inbox_file("first-post", kind) == f"inbox/first-post/{name}"
+
+
+def test_inbox_folder_and_draft_paths_follow_the_contract() -> None:
+    assert V.inbox_folder("first-post") == "inbox/first-post"
+    assert V.draft_folder_for("first-post") == "inbox/first-post/draft"
+    assert V.draft_path_for("first-post") == "inbox/first-post/draft/first-post.md"
+    assert V.evidence_path_for("first-post") == "inbox/first-post/publish-evidence.json"
+
+
+@pytest.mark.parametrize("slug", ["", "First-Post", "a--b", "-a", "a-", "../x", "a/b", "a" * 81, None])
+def test_inbox_paths_refuse_a_slug_outside_the_slug_rule(slug) -> None:
+    for helper in (V.inbox_folder, V.draft_folder_for, V.draft_path_for, V.evidence_path_for,
+                   lambda value: V.inbox_file(value, "memo")):
+        with pytest.raises(V.VerifyError) as caught:
+            helper(slug)
+        assert caught.value.code == "slug_invalid"
+
+
+def test_an_unknown_inbox_file_kind_is_refused() -> None:
+    with pytest.raises(V.VerifyError) as caught:
+        V.inbox_file("first-post", "../publish-evidence.json")
+    assert caught.value.code == "inbox_file_unknown"

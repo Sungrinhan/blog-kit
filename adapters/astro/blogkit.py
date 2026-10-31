@@ -321,9 +321,10 @@ class SlugLock:
     the one this run locked.
     """
 
-    def __init__(self, blog: Path, slug: str) -> None:
+    def __init__(self, blog: Path, slug: str, verifier=None) -> None:
+        verifier = verifier or _load("blogkit_verify", VERIFIER_PATH)
         self.blog = blog
-        self.folder = f"inbox/{slug}"
+        self.folder = verifier.inbox_folder(slug)
         self.relative = f"{self.folder}/{LOCK_NAME}"
         self.path = blog / self.relative
         self.held = False
@@ -764,7 +765,7 @@ def _owned_copy(blog: Path, verifier, slug: str, state: dict[str, str | None], a
     """
     post_path = verifier.post_path_for(slug)
     assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
-    evidence_path = f"{verifier.INBOX_DIR}/{slug}/{verifier.EVIDENCE_NAME}"
+    evidence_path = verifier.evidence_path_for(slug)
     for relative in absent:
         if state[relative] is not None:
             raise CliError("target_exists", relative)
@@ -971,14 +972,14 @@ def _ancestors(relative: str) -> set[str]:
 
 def _read_journal(blog: Path, verifier, slug: str) -> dict:
     """The journal of an interrupted unit, refused unless every path is one convert itself would use."""
-    inbox = f"{verifier.INBOX_DIR}/{slug}"
+    inbox = verifier.inbox_folder(slug)
     relative = f"{inbox}/{JOURNAL_NAME}"
     try:
         journal = json.loads(_read(verifier, blog, relative, MAX_JOURNAL_BYTES).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise CliError("journal_invalid", relative) from None
     assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
-    fixed = {verifier.post_path_for(slug), f"{inbox}/{verifier.EVIDENCE_NAME}"}
+    fixed = {verifier.post_path_for(slug), verifier.evidence_path_for(slug)}
     folders = set().union(*map(_ancestors, (*fixed, f"{assets_dir}/x")))
 
     def target_ok(index: int, target) -> bool:
@@ -1036,7 +1037,7 @@ def recover(blog: Path, slug: str, verifier) -> str | None:
     file the journal does not know (at a target or anywhere in the stage and
     backup folders) stops recovery with nothing changed.
     """
-    inbox = f"{verifier.INBOX_DIR}/{slug}"
+    inbox = verifier.inbox_folder(slug)
     if not interrupted(blog, inbox):
         return None
     blocked = CliError("convert_recovery_blocked", f"{inbox}/{JOURNAL_NAME}")
@@ -1061,12 +1062,12 @@ def recover(blog: Path, slug: str, verifier) -> str | None:
 
 def convert(blog: Path, slug: str, verifier, render) -> dict:
     """Create or replace the public copy (draft: true), its assets and evidence."""
-    inbox = f"{verifier.INBOX_DIR}/{slug}"
-    draft_folder = f"{inbox}/draft"
-    draft_path = f"{draft_folder}/{slug}.md"
+    inbox = verifier.inbox_folder(slug)
+    draft_folder = verifier.draft_folder_for(slug)
+    draft_path = verifier.draft_path_for(slug)
     post_path = verifier.post_path_for(slug)
     assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
-    evidence_path = f"{inbox}/{verifier.EVIDENCE_NAME}"
+    evidence_path = verifier.evidence_path_for(slug)
     absent = [f"{verifier.POSTS_DIR}/{slug}.mdx", f"{verifier.POSTS_DIR}/{slug}"]
 
     def target_state() -> dict[str, str | None]:
@@ -1175,10 +1176,10 @@ def run(args: argparse.Namespace, blog: Path) -> dict:
     require_verifier_copy(blog, doctor)
     require_git_repo(blog)
     verifier = _load("blogkit_verify", VERIFIER_PATH)
-    if not verifier.SLUG_RE.fullmatch(args.slug) or len(args.slug) > verifier.MAX_SLUG:
+    if not verifier.valid_slug(args.slug):
         raise CliError("slug_invalid")
     if args.command in LOCK_COMMANDS:
-        with SlugLock(blog, args.slug):
+        with SlugLock(blog, args.slug, verifier):
             return dispatch(args, blog, verifier)
     return dispatch(args, blog, verifier)
 
@@ -1194,12 +1195,8 @@ def _gate(number: int, errors: list[dict], warnings=()) -> dict:
     return {"gate": number, "passed": not errors, "errors": errors, "warnings": sorted(set(warnings))}
 
 
-def _evidence_path(verifier, slug: str) -> str:
-    return f"{verifier.INBOX_DIR}/{slug}/{verifier.EVIDENCE_NAME}"
-
-
 def _load_evidence(blog: Path, verifier, slug: str) -> dict:
-    relative = _evidence_path(verifier, slug)
+    relative = verifier.evidence_path_for(slug)
     refuse_symlinks(blog, relative)
     if not os.path.lexists(blog / relative):
         raise CliError("evidence_missing", relative)
@@ -1224,10 +1221,10 @@ def _save_evidence(blog: Path, verifier, slug: str, evidence: dict) -> None:
     try:
         verifier.validate_evidence(evidence)
     except verifier.VerifyError:
-        raise CliError("evidence_invalid", _evidence_path(verifier, slug)) from None
-    path = blog / _evidence_path(verifier, slug)
+        raise CliError("evidence_invalid", verifier.evidence_path_for(slug)) from None
+    path = blog / verifier.evidence_path_for(slug)
     temp = path.with_name(path.name + ".tmp")
-    refuse_symlinks(blog, _evidence_path(verifier, slug) + ".tmp")
+    refuse_symlinks(blog, verifier.evidence_path_for(slug) + ".tmp")
     try:
         temp.unlink(missing_ok=True)
         _write_new(temp, (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -1237,7 +1234,7 @@ def _save_evidence(blog: Path, verifier, slug: str, evidence: dict) -> None:
             temp.unlink(missing_ok=True)
         except OSError:
             pass
-        raise CliError("evidence_write_failed", _evidence_path(verifier, slug)) from None
+        raise CliError("evidence_write_failed", verifier.evidence_path_for(slug)) from None
 
 
 def gate_1(blog: Path, doctor) -> dict:
@@ -1511,9 +1508,9 @@ def gate_6(blog: Path, slug: str, verifier, render, post: bytes) -> dict:
             errors.append(_error("image_missing", post_path))
     links = _load("blogkit_links", LINKS_PATH)
     try:
-        allowed = links.load_exceptions(blog / verifier.INBOX_DIR / slug / "draft")
+        allowed = links.load_exceptions(blog / verifier.draft_folder_for(slug))
     except links.LinkError as exc:
-        return _gate(6, [_error(exc.code, f"{verifier.INBOX_DIR}/{slug}/draft", exc.line)])
+        return _gate(6, [_error(exc.code, verifier.draft_folder_for(slug), exc.line)])
     masked, references, blanked, autolinks = _post_parts(post)
     html = _HtmlCheck(render, lambda url, line: None)
     html.feed(blanked)
@@ -1868,7 +1865,7 @@ def publish(blog: Path, slug: str, verifier) -> dict:
     it never resets anything.
     """
     post_path = verifier.post_path_for(slug)
-    evidence_path = _evidence_path(verifier, slug)
+    evidence_path = verifier.evidence_path_for(slug)
     assets_dir = f"{verifier.ASSETS_DIR}/{slug}"
     _recover_swap(blog, verifier, post_path)
     post = _read(verifier, blog, post_path, verifier.MAX_POST_BYTES)
@@ -1906,7 +1903,7 @@ def publish(blog: Path, slug: str, verifier) -> dict:
 
 
 def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
-    inbox = f"{verifier.INBOX_DIR}/{args.slug}"
+    inbox = verifier.inbox_folder(args.slug)
     if args.command == "convert":
         recovered = recover(blog, args.slug, verifier)
         result = convert(blog, args.slug, verifier, _load("blog_render", RENDER_PATH))

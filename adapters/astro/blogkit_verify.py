@@ -82,7 +82,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 VERIFIER_VERSION = "2.3.1-kit.3"
-SELF_DIGEST = {"sha256": "855fc8f8ead69e543643fbe6f70f3aeb7bd9436edbcce0f97b52df3204bbea75"}
+SELF_DIGEST = {"sha256": "26df0ccafad537a1c6aade56c3b2cde4a96b69debba143e380ed003d2cc419ae"}
 
 HASH_ALGO = "blogkit-content-v1"
 HASH_HEADER = b"blogkit-content-v1\n"
@@ -91,6 +91,19 @@ POSTS_DIR = "src/content/posts"
 ASSETS_DIR = "src/assets/posts"
 INBOX_DIR = "inbox"
 EVIDENCE_NAME = "publish-evidence.json"
+DRAFT_DIR = "draft"
+# Every fixed file name inside inbox/<slug>/, by kind; paths come only from inbox_file().
+INBOX_FILES = {
+    "evidence": EVIDENCE_NAME,
+    "memo": "memo.md",
+    "state": "state.md",
+    "prereq": "prereq.md",
+    "interview": "interview.md",
+    "claims": "claims.json",
+    "review": "review.json",
+    "learning": "learning.json",
+    "cross_review": "cross-review.md",
+}
 PREVIEW_VAR = "BLOGKIT_INCLUDE_DRAFTS"
 DIST_PREFIX = "dist:"
 REQUIRED_PAGES = ("index.html", "posts/index.html", "rss.xml")
@@ -252,6 +265,40 @@ def read_assets(root: Path, slug: str) -> dict[str, bytes]:
 
 def post_path_for(slug: str) -> str:
     return f"{POSTS_DIR}/{slug}.md"
+
+
+# ---------------------------------------------------------------- inbox paths
+
+
+def valid_slug(slug) -> bool:
+    return isinstance(slug, str) and bool(SLUG_RE.fullmatch(slug)) and len(slug) <= MAX_SLUG
+
+
+def inbox_folder(slug: str) -> str:
+    """inbox/<slug> (repo-relative), refusing a slug outside the slug rule."""
+    if not valid_slug(slug):
+        raise VerifyError("slug_invalid")
+    return f"{INBOX_DIR}/{slug}"
+
+
+def inbox_file(slug: str, kind: str) -> str:
+    """The repo-relative path of a fixed inbox file (a key of INBOX_FILES)."""
+    folder = inbox_folder(slug)
+    if kind not in INBOX_FILES:
+        raise VerifyError("inbox_file_unknown")
+    return f"{folder}/{INBOX_FILES[kind]}"
+
+
+def evidence_path_for(slug: str) -> str:
+    return inbox_file(slug, "evidence")
+
+
+def draft_folder_for(slug: str) -> str:
+    return f"{inbox_folder(slug)}/{DRAFT_DIR}"
+
+
+def draft_path_for(slug: str) -> str:
+    return f"{draft_folder_for(slug)}/{slug}.md"
 
 
 def content_hash(root: Path, slug: str) -> str:
@@ -441,7 +488,7 @@ def evidence_gaps(evidence: dict, current_hash: str) -> list[str]:
 
 
 def read_evidence(root: Path, slug: str) -> dict:
-    relative = f"{INBOX_DIR}/{slug}/{EVIDENCE_NAME}"
+    relative = evidence_path_for(slug)
     data = _read_capped(root, relative, MAX_EVIDENCE_BYTES)
     try:
         evidence = json.loads(data.decode("utf-8"))
@@ -490,12 +537,12 @@ def _check_public(root: Path, relative: str, data: bytes) -> str:
     if folder != POSTS_DIR:
         raise VerifyError("public_post_in_subfolder", relative)
     slug = name[: -len(".md")]
-    if not SLUG_RE.fullmatch(slug) or len(slug) > MAX_SLUG:
+    if not valid_slug(slug):
         raise VerifyError("slug_invalid", relative)
     parse_public_frontmatter(data, relative)
     current = hash_parts(relative, data, read_assets(root, slug))
     evidence = read_evidence(root, slug)
-    evidence_path = f"{INBOX_DIR}/{slug}/{EVIDENCE_NAME}"
+    evidence_path = evidence_path_for(slug)
     if evidence["slug"] != slug or evidence["post_path"] != relative:
         raise VerifyError("evidence_wrong_post", evidence_path)
     gaps = evidence_gaps(evidence, current)
