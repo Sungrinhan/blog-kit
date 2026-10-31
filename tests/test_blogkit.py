@@ -345,7 +345,8 @@ def _version_mismatch(e: Engine) -> None:
     e.registry_data["plugins"][PLUGIN_ID][0]["version"] = "2.3.1-kit.0"
 
 
-@pytest.mark.parametrize("command", [["sync-verifier"], ["status", "first-post"], ["convert", "first-post"]])
+@pytest.mark.parametrize("command", [["sync-verifier"], ["status", "first-post"], ["convert", "first-post"],
+                                     ["accept-proposal", "fake-rule", "--digest", "0" * 64]])
 def test_a_version_mismatch_is_refused(engine: Engine, command: list[str]) -> None:
     _version_mismatch(engine)
     before = engine.copy.read_bytes()
@@ -1217,8 +1218,8 @@ import shutil
 import sys
 
 cli, mode, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
-seen = {"replace": 0, "rmtree": 0, "rename": 0}
-real = {"replace": os.replace, "rmtree": shutil.rmtree, "rename": os.rename}
+seen = {"replace": 0, "rmtree": 0, "rename": 0, "link": 0, "fsync": 0}
+real = {"replace": os.replace, "rmtree": shutil.rmtree, "rename": os.rename, "link": os.link, "fsync": os.fsync}
 
 
 def wrap(name):
@@ -1236,6 +1237,8 @@ def wrap(name):
 os.replace = wrap("replace")
 shutil.rmtree = wrap("rmtree")
 os.rename = wrap("rename")
+os.link = wrap("link")
+os.fsync = wrap("fsync")
 sys.argv = [cli, *sys.argv[4:]]
 runpy.run_path(cli, run_name="__main__")
 '''
@@ -2384,7 +2387,7 @@ def test_a_failed_commit_is_finished_by_running_publish_again(engine: Engine) ->
 
 ALL_COMMANDS = [["convert", SLUG], ["check", SLUG], ["status", SLUG], ["approve", SLUG, "--hash", "0" * 64,
                 "--warnings", "0" * 64], ["publish", SLUG], ["record-review", SLUG], ["record-learning", SLUG],
-                ["sync-verifier"]]
+                ["accept-proposal", "fake-rule", "--digest", "0" * 64], ["sync-verifier"]]
 
 
 def test_no_command_prints_planted_secrets_on_the_normal_or_failing_path(engine: Engine) -> None:
@@ -3726,3 +3729,429 @@ def test_cross_review_takes_the_slug_lock(engine: Engine) -> None:
     rc, payload, output = engine.run("cross-review", SLUG)
     assert rc == 1 and _codes(payload) == ["slug_locked"], output
     assert (engine.blog / CROSS_REVIEW).read_text(encoding="utf-8") == OLD_CROSS_REVIEW
+
+
+# ------------------------------------------------------------------ accept-proposal
+
+PENDING = ".blogkit/pending"
+PRINCIPLES = ".blogkit/principles"
+CARDS = ".blogkit/cards"
+BLOG_LOCK = ".blogkit/blogkit.lock"
+LOADER = ROOT / "scripts" / "load_blogkit_context.py"
+PRINCIPLE_STATEMENT = "가짜 원칙 진술입니다"
+PRINCIPLE_TEXT = (
+    "---\n"
+    "kind: principle\n"
+    f"statement: {PRINCIPLE_STATEMENT}\n"
+    "interview_ids: I-1, I-2\n"
+    "checked: 2026-10-30\n"
+    "applies_when: 가짜 적용 조건\n"
+    "exceptions: 가짜 예외\n"
+    "relation: 없음\n"
+    "---\n"
+    "\n"
+    "가짜 원칙 설명.\n"
+)
+CARD_TEXT = (
+    "---\n"
+    "kind: card\n"
+    "description: 가짜 개념 설명\n"
+    "source_url: https://docs.invalid/fake-card\n"
+    "first_post: first-post\n"
+    "checked: 2026-10-30\n"
+    "---\n"
+)
+
+
+def _proposal(engine: Engine, text: str | bytes = PRINCIPLE_TEXT, pid: str = "fake-rule") -> str:
+    """Write .blogkit/pending/<pid>.md and return the digest of its bytes."""
+    path = engine.blog / PENDING / f"{pid}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = text if isinstance(text, bytes) else text.encode("utf-8")
+    path.write_bytes(data)
+    return _sha(data)
+
+
+def _accept(engine: Engine, pid: str = "fake-rule", digest: str | None = None,
+            script: Path | None = None) -> tuple[int, dict, str]:
+    if digest is None:
+        digest = _sha((engine.blog / PENDING / f"{pid}.md").read_bytes())
+    return engine.run("accept-proposal", pid, "--digest", digest, script=script)
+
+
+def _dotfiles(engine: Engine, folder: str) -> list[str]:
+    path = engine.blog / folder
+    return sorted(p.name for p in path.iterdir() if p.name.startswith(".")) if path.is_dir() else []
+
+
+@pytest.mark.parametrize("text,folder", [(PRINCIPLE_TEXT, PRINCIPLES), (CARD_TEXT, CARDS)], ids=["principle", "card"])
+def test_an_accepted_proposal_moves_to_its_kind_folder(engine: Engine, text: str, folder: str) -> None:
+    digest = _proposal(engine, text)
+    rc, payload, output = _accept(engine)
+    assert rc == 0, output
+    target = f"{folder}/fake-rule.md"
+    assert payload["target"] == target and payload["digest"] == digest
+    assert payload["kind"] == ("principle" if folder == PRINCIPLES else "card")
+    assert (engine.blog / target).read_bytes() == text.encode("utf-8")
+    assert not (engine.blog / PENDING / "fake-rule.md").exists()
+    assert _dotfiles(engine, folder) == [] and not (engine.blog / BLOG_LOCK).exists()
+    assert PRINCIPLE_STATEMENT not in output
+
+
+def _drop(key: str, text: str = PRINCIPLE_TEXT) -> str:
+    return "".join(line for line in text.splitlines(keepends=True) if not line.startswith(f"{key}:"))
+
+
+def _set(key: str, value: str, text: str = PRINCIPLE_TEXT) -> str:
+    return "".join(f"{key}: {value}\n" if line.startswith(f"{key}:") else line
+                   for line in text.splitlines(keepends=True))
+
+
+@pytest.mark.parametrize("text,code,extra", [
+    *[(_drop(key), "proposal_field_missing", {"field": key})
+      for key in ("kind", "statement", "interview_ids", "checked", "applies_when", "exceptions", "relation")],
+    *[(_drop(key, CARD_TEXT), "proposal_field_missing", {"field": key})
+      for key in ("description", "source_url", "first_post", "checked")],
+    (_set("source_url", "http://docs.invalid/fake-card", CARD_TEXT), "proposal_field_invalid", {"field": "source_url"}),
+    (_set("source_url", "https://", CARD_TEXT), "proposal_field_invalid", {"field": "source_url"}),
+    (_set("source_url", "docs.invalid/fake", CARD_TEXT), "proposal_field_invalid", {"field": "source_url"}),
+    (_set("first_post", "../other", CARD_TEXT), "proposal_field_invalid", {"field": "first_post"}),
+    (_set("kind", "rule"), "proposal_field_invalid", {"field": "kind"}),
+    (_set("interview_ids", "Q-1"), "proposal_field_invalid", {"field": "interview_ids"}),
+    (_set("interview_ids", "I-1, I-1"), "proposal_field_invalid", {"field": "interview_ids"}),
+    (_set("checked", "2026-02-30"), "proposal_field_invalid", {"field": "checked"}),
+    (_set("statement", "   "), "proposal_invalid", {"line": 3}),
+    (PRINCIPLE_TEXT.replace("relation: 없음\n", "relation: 없음\nrelation: 또\n"), "proposal_invalid", {"line": 9}),
+    (PRINCIPLE_TEXT.replace("relation: 없음\n", "relation: 없음\nowner: 가짜\n"), "proposal_invalid", {"line": 9}),
+    (CARD_TEXT.replace("checked: 2026-10-30\n", "checked: 2026-10-30\nstatement: 가짜\n"), "proposal_invalid",
+     {"line": 7}),
+    (PRINCIPLE_TEXT.replace("---\n", "", 1), "proposal_invalid", {"line": 1}),
+    (PRINCIPLE_TEXT.replace("\n---\n", "\n", 1), "proposal_invalid", {}),
+    ("\ufeff" + PRINCIPLE_TEXT, "proposal_invalid", {"line": 1}),
+    (PRINCIPLE_TEXT.encode("utf-8") + b"\xff\n", "proposal_not_utf8", {}),
+], ids=[*[f"principle-no-{k}" for k in ("kind", "statement", "interview_ids", "checked", "applies_when",
+                                        "exceptions", "relation")],
+        *[f"card-no-{k}" for k in ("description", "source_url", "first_post", "checked")],
+        "card-http-url", "card-url-no-host", "card-url-no-scheme", "card-bad-first-post", "unknown-kind",
+        "bad-interview-id", "repeated-interview-id", "bad-date", "blank-value", "duplicate-key", "unknown-key",
+        "other-kind-key", "no-head", "unclosed-head", "bom", "not-utf8"])
+def test_a_proposal_that_is_not_well_formed_is_refused_and_kept(engine: Engine, text, code: str, extra: dict) -> None:
+    _proposal(engine, text)
+    before = _tree(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 1 and _codes(payload) == [code], output
+    error = payload["errors"][0]
+    if "line" in extra:
+        assert error["line"] == extra["line"], output
+    if "field" in extra:
+        assert payload["field"] == extra["field"], output
+    assert error["path"] == f"{PENDING}/fake-rule.md"
+    assert _tree(engine) == before
+    assert PRINCIPLE_STATEMENT not in output and "가짜" not in output
+
+
+def test_a_digest_that_does_not_match_is_refused_and_kept(engine: Engine) -> None:
+    _proposal(engine)
+    before = _tree(engine)
+    rc, payload, output = _accept(engine, digest="0" * 64)
+    assert rc == 1 and _codes(payload) == ["proposal_digest_mismatch"], output
+    assert _tree(engine) == before
+
+
+def test_a_proposal_changed_after_its_digest_was_shown_is_refused(engine: Engine) -> None:
+    digest = _proposal(engine)
+    _proposal(engine, PRINCIPLE_TEXT + "한 줄 더.\n")
+    before = _tree(engine)
+    rc, payload, output = _accept(engine, digest=digest)
+    assert rc == 1 and _codes(payload) == ["proposal_digest_mismatch"], output
+    assert _tree(engine) == before
+
+
+def test_a_missing_proposal_is_reported(engine: Engine) -> None:
+    (engine.blog / PENDING).mkdir(parents=True)
+    rc, payload, output = _accept(engine, digest="0" * 64)
+    assert rc == 1 and _codes(payload) == ["proposal_missing"], output
+    assert payload["errors"][0]["path"] == f"{PENDING}/fake-rule.md"
+
+
+def test_a_proposal_over_64_kb_is_refused(engine: Engine) -> None:
+    _proposal(engine, PRINCIPLE_TEXT + "가" * (22 * 1024))
+    before = _tree(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 1 and _codes(payload) == ["file_too_large"], output
+    assert _tree(engine) == before
+
+
+def _placed(engine: Engine, relative: str) -> str:
+    path = engine.blog / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(PRINCIPLE_TEXT, encoding="utf-8")
+    return _sha(PRINCIPLE_TEXT.encode("utf-8"))
+
+
+@pytest.mark.parametrize("pid,place", [
+    ("../x", ".blogkit/x.md"),
+    ("../pending/x", f"{PENDING}/x.md"),
+    ("ABSOLUTE", None),
+    ("Fake-rule", f"{PENDING}/Fake-rule.md"),
+    ("a" * 65, f"{PENDING}/{'a' * 65}.md"),
+    ("fake.rule", f"{PENDING}/fake.rule.md"),
+    ("fake-rule.md", f"{PENDING}/fake-rule.md.md"),
+], ids=["dotdot", "dotdot-back-into-pending", "absolute", "upper", "65-chars", "dot", "suffix"])
+def test_an_id_outside_the_proposal_rule_is_refused(engine: Engine, pid: str, place: str | None) -> None:
+    """Each bad id names a file that would pass if the engine joined it into a path."""
+    if pid == "ABSOLUTE":
+        outside = engine.tmp / "outside" / "x.md"
+        outside.parent.mkdir()
+        outside.write_text(PRINCIPLE_TEXT, encoding="utf-8")
+        pid, digest = str(outside.with_suffix("")), _sha(outside.read_bytes())
+    else:
+        digest = _placed(engine, place)
+    _proposal(engine)
+    before = _tree(engine)
+    rc, payload, output = _accept(engine, pid, digest)
+    assert rc == 1 and _codes(payload) == ["proposal_id_invalid"], output
+    assert _tree(engine) == before
+    assert not (engine.blog / PRINCIPLES).exists() and not (engine.blog / CARDS).exists()
+
+
+def test_an_id_of_64_characters_is_accepted(engine: Engine) -> None:
+    pid = "a" + "-" * 62 + "z"
+    _proposal(engine, pid=pid)
+    rc, payload, output = _accept(engine, pid)
+    assert rc == 0 and payload["target"] == f"{PRINCIPLES}/{pid}.md", output
+
+
+@pytest.mark.parametrize("existing,same", [(PRINCIPLE_TEXT, True), ("# 다른 가짜 원칙\n", False)],
+                         ids=["same-content", "other-content"])
+def test_an_existing_target_is_refused_and_the_proposal_kept(engine: Engine, existing: str, same: bool) -> None:
+    _proposal(engine)
+    target = engine.blog / PRINCIPLES / "fake-rule.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(existing, encoding="utf-8")
+    before = _tree(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 1 and _codes(payload) == ["proposal_target_exists"], output
+    assert payload["errors"][0]["path"] == f"{PRINCIPLES}/fake-rule.md" and payload["same"] is same
+    assert _tree(engine) == before
+
+
+def test_a_principle_with_the_id_of_a_card_is_its_own_target(engine: Engine) -> None:
+    card = engine.blog / CARDS / "fake-rule.md"
+    card.parent.mkdir(parents=True)
+    card.write_text(CARD_TEXT, encoding="utf-8")
+    _proposal(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 0 and payload["target"] == f"{PRINCIPLES}/fake-rule.md", output
+    assert card.read_text(encoding="utf-8") == CARD_TEXT
+
+
+def test_a_full_kind_folder_refuses_one_more(engine: Engine) -> None:
+    folder = engine.blog / PRINCIPLES
+    folder.mkdir(parents=True)
+    for number in range(200):
+        (folder / f"old-{number}.md").write_text("# 가짜\n", encoding="utf-8")
+    _proposal(engine)
+    before = _tree(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 1 and _codes(payload) == ["proposal_kind_full"], output
+    assert payload["errors"][0]["path"] == PRINCIPLES
+    assert _tree(engine) == before
+
+
+def test_dot_files_and_other_names_do_not_fill_a_kind_folder(engine: Engine) -> None:
+    folder = engine.blog / PRINCIPLES
+    folder.mkdir(parents=True)
+    for number in range(199):
+        (folder / f"old-{number}.md").write_text("# 가짜\n", encoding="utf-8")
+    (folder / ".hidden.md").write_text("x\n")
+    (folder / "README.txt").write_text("x\n")
+    _proposal(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 0, output
+
+
+def _lock_left_by_the_killed_run(engine: Engine) -> None:
+    """A killed run leaves its lock with a dead pid; the next run clears it on its own."""
+    assert (engine.blog / BLOG_LOCK).exists()
+
+
+def test_a_stop_after_the_link_shows_as_an_existing_target(engine: Engine) -> None:
+    _proposal(engine)
+    rc, _, output = _accept(engine, script=_crash(engine, "after-link", 1))
+    assert rc == 9, output
+    assert (engine.blog / PRINCIPLES / "fake-rule.md").read_text(encoding="utf-8") == PRINCIPLE_TEXT
+    assert (engine.blog / PENDING / "fake-rule.md").exists()
+    _lock_left_by_the_killed_run(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 1 and _codes(payload) == ["proposal_target_exists"] and payload["same"] is True, output
+    assert (engine.blog / PENDING / "fake-rule.md").read_text(encoding="utf-8") == PRINCIPLE_TEXT
+    assert _dotfiles(engine, PRINCIPLES) == []
+
+
+def _load_context(engine: Engine) -> dict:
+    """The context loader's summary for the draft bundle (which reads principles) in this blog repo."""
+    _terms_file(engine)
+    _inputs(engine)
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    env["HOME"] = str(engine.home)
+    result = subprocess.run(
+        [sys.executable, str(LOADER), "--blog-repo", str(engine.blog), "--bundle", "draft", "--slug", SLUG],
+        capture_output=True, text=True, env=env, cwd=engine.tmp, timeout=60,
+    )
+    marker = result.stdout.rindex("=== BLOGKIT CONTEXT SUMMARY")
+    summary = json.loads(result.stdout[result.stdout.index("\n", marker):])
+    assert result.returncode == 0, result.stdout + result.stderr
+    return summary
+
+
+@pytest.mark.parametrize("mode", ["before-link", "after-fsync", "before-fsync"])
+def test_a_stop_while_writing_leaves_only_a_dot_file_that_the_next_run_removes(engine: Engine, mode: str) -> None:
+    _proposal(engine)
+    rc, _, output = _accept(engine, script=_crash(engine, mode, 1))
+    assert rc == 9, output
+    folder = engine.blog / PRINCIPLES
+    names = sorted(p.name for p in folder.iterdir())
+    assert len(names) == 1 and names[0].startswith("."), names
+    assert (engine.blog / PENDING / "fake-rule.md").read_text(encoding="utf-8") == PRINCIPLE_TEXT
+    summary = _load_context(engine)
+    paths = [item["path"] for item in summary["files"]] + [item["path"] for item in summary["skipped"]]
+    assert not any(path.startswith(PRINCIPLES) for path in paths), summary
+    _lock_left_by_the_killed_run(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 0, output
+    assert sorted(p.name for p in folder.iterdir()) == ["fake-rule.md"]
+    assert (folder / "fake-rule.md").read_text(encoding="utf-8") == PRINCIPLE_TEXT
+    summary = _load_context(engine)
+    assert f"{PRINCIPLES}/fake-rule.md" in [item["path"] for item in summary["files"]]
+
+
+def test_the_leftover_of_another_id_is_left_alone(engine: Engine) -> None:
+    folder = engine.blog / PRINCIPLES
+    folder.mkdir(parents=True)
+    (folder / ".other-rule.md.tmp").write_text("partial\n")
+    _proposal(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 0, output
+    assert (folder / ".other-rule.md.tmp").read_text() == "partial\n"
+
+
+def _outside(engine: Engine) -> Path:
+    outside = engine.tmp / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "fake-rule.md").write_text("keep\n")
+    return outside
+
+
+def _symlinked_target(e: Engine) -> None:
+    (e.blog / PRINCIPLES).mkdir(parents=True)
+    (e.blog / PRINCIPLES / "fake-rule.md").symlink_to(_outside(e) / "fake-rule.md")
+
+
+def _dangling_target(e: Engine) -> None:
+    (e.blog / PRINCIPLES).mkdir(parents=True)
+    (e.blog / PRINCIPLES / "fake-rule.md").symlink_to(e.tmp / "nowhere" / "fake-rule.md")
+
+
+def _symlinked_kind_folder(e: Engine) -> None:
+    (e.blog / ".blogkit").mkdir(exist_ok=True)
+    (e.blog / PRINCIPLES).symlink_to(_outside(e))
+
+
+def _symlinked_proposal(e: Engine) -> None:
+    proposal = e.blog / PENDING / "fake-rule.md"
+    real = e.tmp / "real-proposal.md"
+    real.write_bytes(proposal.read_bytes())
+    proposal.unlink()
+    proposal.symlink_to(real)
+
+
+def _symlinked_pending(e: Engine) -> None:
+    real = e.tmp / "real-pending"
+    (e.blog / PENDING).rename(real)
+    (e.blog / PENDING).symlink_to(real)
+
+
+def _symlinked_blogkit(e: Engine) -> None:
+    real = e.tmp / "real-blogkit"
+    (e.blog / ".blogkit").rename(real)
+    (e.blog / ".blogkit").symlink_to(real)
+
+
+@pytest.mark.parametrize("change,path", [
+    (_symlinked_target, f"{PRINCIPLES}/fake-rule.md"),
+    (_dangling_target, f"{PRINCIPLES}/fake-rule.md"),
+    (_symlinked_kind_folder, PRINCIPLES),
+    (_symlinked_proposal, f"{PENDING}/fake-rule.md"),
+    (_symlinked_pending, PENDING),
+    (_symlinked_blogkit, ".blogkit"),
+], ids=["target", "dangling-target", "kind-folder", "proposal", "pending-folder", "blogkit-folder"])
+def test_symlinks_on_the_proposal_or_the_target_are_refused(engine: Engine, change, path: str) -> None:
+    digest = _proposal(engine)
+    change(engine)
+    before = _tree(engine)
+    outside = engine.tmp / "outside"
+    outside_before = sorted(p.name for p in outside.iterdir()) if outside.exists() else []
+    rc, payload, output = _accept(engine, digest=digest)
+    assert rc == 1 and _codes(payload) == ["symlink_refused"], output
+    assert payload["errors"][0]["path"] == path
+    assert _tree(engine) == before
+    if outside.exists():
+        assert sorted(p.name for p in outside.iterdir()) == outside_before
+        assert (outside / "fake-rule.md").read_text() == "keep\n"
+
+
+def test_a_kind_folder_that_is_a_file_is_refused(engine: Engine) -> None:
+    _proposal(engine)
+    (engine.blog / PRINCIPLES).write_text("not a folder\n")
+    before = _tree(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 1 and _codes(payload) == ["not_a_folder"], output
+    assert _tree(engine) == before
+
+
+def test_a_proposal_that_is_a_folder_is_refused(engine: Engine) -> None:
+    (engine.blog / PENDING / "fake-rule.md").mkdir(parents=True)
+    rc, payload, output = _accept(engine, digest="0" * 64)
+    assert rc == 1 and _codes(payload) == ["not_a_regular_file"], output
+
+
+def test_accept_proposal_refuses_a_held_blog_lock(engine: Engine) -> None:
+    _proposal(engine)
+    held = json.dumps({"pid": os.getpid(), "host": socket.gethostname()})
+    (engine.blog / BLOG_LOCK).write_text(held)
+    before = _tree(engine)
+    rc, payload, output = _accept(engine)
+    assert rc == 1 and _codes(payload) == ["blog_locked"], output
+    assert _tree(engine) == before
+
+
+def test_a_dead_process_blog_lock_is_cleared(engine: Engine) -> None:
+    _proposal(engine)
+    (engine.blog / BLOG_LOCK).write_text(json.dumps({"pid": _dead_pid(), "host": socket.gethostname()}))
+    rc, payload, output = _accept(engine)
+    assert rc == 0, output
+    assert not (engine.blog / BLOG_LOCK).exists()
+
+
+def test_a_blog_repo_without_a_blogkit_folder_is_reported(engine: Engine) -> None:
+    rc, payload, output = _accept(engine, digest="0" * 64)
+    assert rc == 1 and _codes(payload) == ["blogkit_folder_missing"], output
+    assert not (engine.blog / ".blogkit").exists()
+
+
+@pytest.mark.parametrize("text", [
+    "---\nkind: principle\nstatement: " + "가" * (21 * 1024),
+    "---\n" + "statement: x\n" * (64 * 1024 // 13 - 1),
+    "---\n" * (64 * 1024 // 4),
+    "---\nkind: card\nsource_url: https://" + "a." * (32 * 1024 - 40) + "\n---\n",
+    "---\nkind: principle\ninterview_ids: " + "I-1, " * (64 * 1024 // 5 - 10) + "\n---\n",
+    "---\n" + ":" * (64 * 1024 - 10) + "\n---\n",
+], ids=["unclosed-long-line", "repeated-key-no-close", "repeated-markers", "long-url", "long-id-list",
+        "colon-run"])
+def test_the_proposal_parser_stays_fast_on_worst_case_input(engine: Engine, text: str) -> None:
+    _proposal(engine, text)
+    engine.timeout = 20
+    rc, payload, output = _accept(engine)
+    assert rc == 1 and _codes(payload)[0].startswith("proposal_"), output
+    assert (engine.blog / PENDING / "fake-rule.md").exists()

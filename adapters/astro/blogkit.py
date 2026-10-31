@@ -12,6 +12,7 @@ Commands (each prints one JSON object and exits 1 on failure):
     record-review SLUG  review record from inbox/<slug>/review.json, bound to its inputs
     record-learning SLUG  learning record from inbox/<slug>/learning.json, bound to its digest
     cross-review SLUG   read-only Codex review of the checked public copy into inbox/<slug>/cross-review.md
+    accept-proposal ID  move .blogkit/pending/<ID>.md, whose --digest the person names, to principles/ or cards/
     sync-verifier       copy the installed verifier to the blog repo
 
 Every command first requires the install identity: this file must not live
@@ -24,7 +25,9 @@ of a git work tree. Commands that change the evidence or the public copy
 (convert, check, approve, publish, memo-check, record-review, record-learning, cross-review) hold an
 exclusive flock on inbox/<slug>/blogkit.lock, which records the process id and host; only a lock
 left by a dead process on this host is cleared, and judging it happens under
-the flock.
+the flock. accept-proposal holds the same lock once for the whole blog repo,
+on .blogkit/blogkit.lock (blog_locked, blog_lock_unreadable, and
+blogkit_folder_missing when there is no .blogkit folder).
 
 convert creates or replaces the public copy from the upstream-format draft. The
 draft frontmatter is a restricted subset (title, description of at most 160
@@ -179,12 +182,63 @@ again (a change records nothing). The state's cross_review takes the content
 hash, the status (done, skipped or blocked) and the reason code; the output
 is that status and reason only. The evidence is never touched.
 
+accept-proposal takes a proposal ID, not a slug: ^[a-z0-9][a-z0-9-]{0,63}$,
+checked before it names any file (proposal_id_invalid), and the only names
+it uses are .blogkit/pending/<ID>.md and the direct entry <ID>.md of the
+kind's folder, .blogkit/principles or .blogkit/cards. The proposal is read
+once (a regular file, no symlink component, at most 64 KB) and those bytes
+are digested and parsed: a digest other than --digest is
+proposal_digest_mismatch. The file starts with a head between two "---"
+lines; each head line is "key: value" (one space after the colon, a value
+that is not blank, taken as is, no quoting), and the Markdown after the head
+is free:
+
+    ---
+    kind: principle
+    statement: the person's own statement, as said
+    interview_ids: I-3, I-7
+    checked: 2026-10-30
+    applies_when: when the principle applies
+    exceptions: when it does not
+    relation: how it relates to earlier principles (or "none")
+    ---
+
+    ---
+    kind: card
+    description: what the concept is
+    source_url: https://official.example/doc
+    first_post: <slug of the post where it first came up>
+    checked: 2026-10-30
+    ---
+
+A first line that is not "---" (a BOM included), a head that never closes, a
+line that is not "key: value", a blank value, a duplicate key or a key the
+kind does not have is proposal_invalid with its line; a missing key is
+proposal_field_missing and a bad value proposal_field_invalid, each with
+field. interview_ids are distinct I-<number> ids joined by commas, checked
+is a real YYYY-MM-DD date, source_url is https:// with a host, first_post is
+a valid slug; bytes that are not UTF-8 are proposal_not_utf8. Then, in the
+kind's folder (made when missing; a symlink or a file there is refused), this
+ID's leftover dot temp file .<ID>.md.tmp from a stopped run is removed. A
+target that exists, the same bytes or not, is proposal_target_exists with
+same true or false, and nothing else happens: no repair, the proposal stays
+(a run stopped after the link and before the deletes shows this way, and the
+person deletes the proposal). A folder that already holds 200 notes (the
+context loader's per-kind cap) or 1000 entries is proposal_kind_full.
+Otherwise the bytes go to .<ID>.md.tmp (exclusive create, fsync), os.link
+registers them as the target (never over a file), and the temp file and then
+the proposal are deleted. A run stopped while writing leaves only the dot
+file, which the context loader and this command's target judgment never
+read. Every refusal keeps the proposal. Output is the id, kind, target path,
+digest and whether a leftover was removed.
+
 Output holds fixed error codes, check ids and reasons, versions,
 repo-relative paths and line numbers only. It never prints post text, external command output
 or URLs.
 
 Usage:
     python3 blogkit.py COMMAND [SLUG] [--blog-repo PATH]
+    python3 blogkit.py accept-proposal ID --digest DIGEST [--blog-repo PATH]
 """
 
 from __future__ import annotations
@@ -326,6 +380,22 @@ PASSING_VERDICTS = frozenset({"match", "stance_changed"})
 JOURNAL_TARGET_KEYS = frozenset({"path", "existed", "original_digest", "new_digest", "staged", "backup"})
 # cross-review: where Codex is looked for after PATH (the macOS app bundle's CLI), its limits and its
 # fixed prompt. The result file is UTF-8 Markdown whose last line is one of CODEX_VERDICTS.
+BLOGKIT_FOLDER = ".blogkit"
+PENDING_FOLDER = ".blogkit/pending"
+PROPOSAL_FOLDERS = {"principle": ".blogkit/principles", "card": ".blogkit/cards"}
+PROPOSAL_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+NOTE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\.md")
+MAX_NOTE_BYTES = 64 * 1024
+MAX_NOTES_PER_KIND = 200
+MAX_KIND_FOLDER_ENTRIES = 1000
+PROPOSAL_FIELDS = {
+    "principle": ("kind", "statement", "interview_ids", "checked", "applies_when", "exceptions", "relation"),
+    "card": ("kind", "description", "source_url", "first_post", "checked"),
+}
+PROPOSAL_KEYS = frozenset(key for fields in PROPOSAL_FIELDS.values() for key in fields)
+PROPOSAL_LINE_RE = re.compile(r"([a-z_]{1,32}): (.*)")
+HTTPS_URL_RE = re.compile(r"https://[^\s/?#@\\]+(?:[/?#][^\s\\]*)?")
+DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 CODEX_APP_PATHS = ("/Applications/Codex.app/Contents/Resources/codex",)
 CODEX_VERSION_TIMEOUT = 20.0
 CODEX_TIMEOUT = 600.0
@@ -496,10 +566,15 @@ class SlugLock:
     the one this run locked.
     """
 
+    MISSING, LOCKED, UNREADABLE = "slug_folder_missing", "slug_locked", "slug_lock_unreadable"
+
     def __init__(self, blog: Path, slug: str, verifier=None) -> None:
         verifier = verifier or _load("blogkit_verify", VERIFIER_PATH)
+        self._at(blog, verifier.inbox_folder(slug))
+
+    def _at(self, blog: Path, folder: str) -> None:
         self.blog = blog
-        self.folder = verifier.inbox_folder(slug)
+        self.folder = folder
         self.relative = f"{self.folder}/{LOCK_NAME}"
         self.path = blog / self.relative
         self.held = False
@@ -508,23 +583,23 @@ class SlugLock:
     def __enter__(self) -> "SlugLock":
         refuse_symlinks(self.blog, self.relative)
         if not (self.blog / self.folder).is_dir():
-            raise CliError("slug_folder_missing", self.folder)
+            raise CliError(self.MISSING, self.folder)
         try:
             fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o644)
         except OSError:
-            raise CliError("slug_lock_unreadable", self.relative) from None
+            raise CliError(self.UNREADABLE, self.relative) from None
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise CliError("slug_lock_unreadable", self.relative)
+                raise CliError(self.UNREADABLE, self.relative)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                raise CliError("slug_locked", self.relative) from None
+                raise CliError(self.LOCKED, self.relative) from None
             if not self._same_file(fd):  # released and removed by its holder since we opened it
-                raise CliError("slug_locked", self.relative)
+                raise CliError(self.LOCKED, self.relative)
             data = os.read(fd, MAX_LOCK_BYTES + 1)
             if data and not self._stale(data):
-                raise CliError("slug_locked", self.relative)
+                raise CliError(self.LOCKED, self.relative)
             os.ftruncate(fd, 0)
             os.pwrite(fd, json.dumps({"pid": os.getpid(), "host": socket.gethostname()}).encode("utf-8"), 0)
         except BaseException:
@@ -546,13 +621,13 @@ class SlugLock:
         try:
             holder = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            raise CliError("slug_lock_unreadable", self.relative) from None
+            raise CliError(self.UNREADABLE, self.relative) from None
         pid = holder.get("pid") if isinstance(holder, dict) else None
         host = holder.get("host") if isinstance(holder, dict) else None
         # pid 0 and negative pids would signal process groups, never a holder.
         if (len(data) > MAX_LOCK_BYTES or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
                 or not isinstance(host, str)):
-            raise CliError("slug_lock_unreadable", self.relative)
+            raise CliError(self.UNREADABLE, self.relative)
         if host != socket.gethostname():
             return False
         try:
@@ -572,6 +647,15 @@ class SlugLock:
         finally:
             os.close(self.fd)
             self.fd, self.held = None, False
+
+
+class BlogLock(SlugLock):
+    """.blogkit/blogkit.lock: the same lock, once for the whole blog repo (accept-proposal)."""
+
+    MISSING, LOCKED, UNREADABLE = "blogkit_folder_missing", "blog_locked", "blog_lock_unreadable"
+
+    def __init__(self, blog: Path) -> None:
+        self._at(blog, BLOGKIT_FOLDER)
 
 
 # ---------------------------------------------------------------- convert
@@ -1338,6 +1422,10 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--warnings", required=True, help="Warning set digest shown by status")
         if name == "memo-check":
             command.add_argument("--confirm", default=None, help="Warning set digest shown by memo-check")
+    accept = commands.add_parser("accept-proposal")
+    accept.add_argument("proposal_id")
+    accept.add_argument("--digest", required=True, help="Proposal file digest shown by /blog-learn")
+    accept.add_argument("--blog-repo", default=None, help="Blog repo folder (default: current folder)")
     sync = commands.add_parser("sync-verifier")
     sync.add_argument("--blog-repo", default=None, help="Blog repo folder (default: current folder)")
     return parser
@@ -1353,6 +1441,12 @@ def run(args: argparse.Namespace, blog: Path) -> dict:
     require_verifier_copy(blog, doctor)
     require_git_repo(blog)
     verifier = _load("blogkit_verify", VERIFIER_PATH)
+    if args.command == "accept-proposal":
+        # A proposal id, never a slug or a path: checked here, before it names any file.
+        if not PROPOSAL_ID_RE.fullmatch(args.proposal_id):
+            raise CliError("proposal_id_invalid")
+        with BlogLock(blog):
+            return accept_proposal(blog, args.proposal_id, args.digest, verifier)
     if not verifier.valid_slug(args.slug):
         raise CliError("slug_invalid")
     if args.command in LOCK_COMMANDS:
@@ -2758,6 +2852,143 @@ def cross_review(blog: Path, slug: str, verifier) -> dict:
         return {"cross_review": _save_cross_review(blog, verifier, slug, current, "skipped", reason)}
     return {"cross_review": _save_cross_review(blog, verifier, slug, current, "done", None,
                                                _cut(result, MAX_CROSS_REVIEW_BYTES))}
+
+
+# ---------------------------------------------------------------- accept-proposal
+
+
+def parse_proposal(data: bytes, relative: str, verifier) -> tuple[str, dict[str, str]]:
+    """The kind and fields of a proposal file's head, or a fixed error code.
+
+    The head is the first lines, between a "---" line and the next one; each
+    line in it is "key: value" with a lower-case key and a value that is not
+    blank, taken as is (no quoting). Text after the head is free Markdown.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CliError("proposal_not_utf8", relative) from None
+    lines = text.split("\n")
+    if lines[0] != "---":
+        raise CliError("proposal_invalid", relative, 1)
+    fields: dict[str, tuple[str, int]] = {}
+    for number, line in enumerate(lines[1:], start=2):
+        if line == "---":
+            break
+        match = PROPOSAL_LINE_RE.fullmatch(line)
+        if (not match or match[1] not in PROPOSAL_KEYS or match[1] in fields
+                or not match[2].strip()):
+            raise CliError("proposal_invalid", relative, number)
+        fields[match[1]] = (match[2], number)
+    else:
+        raise CliError("proposal_invalid", relative)
+    if "kind" not in fields:
+        raise CliError("proposal_field_missing", relative, field="kind")
+    kind, line = fields["kind"]
+    if kind not in PROPOSAL_FIELDS:
+        raise CliError("proposal_field_invalid", relative, line, field="kind")
+    for key, (_, line) in fields.items():
+        if key not in PROPOSAL_FIELDS[kind]:
+            raise CliError("proposal_invalid", relative, line)
+    for key in PROPOSAL_FIELDS[kind]:
+        if key not in fields:
+            raise CliError("proposal_field_missing", relative, field=key)
+    for key, (value, line) in fields.items():
+        if not _proposal_value_ok(key, value, verifier):
+            raise CliError("proposal_field_invalid", relative, line, field=key)
+    return kind, {key: value for key, (value, _) in fields.items()}
+
+
+def _proposal_value_ok(key: str, value: str, verifier) -> bool:
+    if key == "interview_ids":
+        ids = [item.strip() for item in value.split(",")]
+        return _ids(ids, INTERVIEW_ID_RE, allow_empty=False)
+    if key == "checked":
+        if not DATE_RE.fullmatch(value):
+            return False
+        try:
+            datetime.date.fromisoformat(value)
+        except ValueError:
+            return False
+        return True
+    if key == "source_url":
+        return HTTPS_URL_RE.fullmatch(value) is not None
+    if key == "first_post":
+        return verifier.valid_slug(value)
+    return True
+
+
+def _kind_folder(blog: Path, folder: str, pid: str) -> bool:
+    """Judge the kind folder and remove this id's leftover dot temp file. Whether one was removed."""
+    refuse_symlinks(blog, folder)
+    path = blog / folder
+    if not os.path.lexists(path):
+        path.mkdir()
+        return False
+    if not path.is_dir():
+        raise CliError("not_a_folder", folder)
+    leftover = path / f".{pid}.md.tmp"
+    if not os.path.lexists(leftover):
+        return False
+    if leftover.is_dir() and not leftover.is_symlink():
+        raise CliError("proposal_leftover_invalid", f"{folder}/{leftover.name}")
+    leftover.unlink()
+    return True
+
+
+def _kind_full(blog: Path, folder: str) -> bool:
+    """Whether one more note would pass the context loader's caps for this kind's folder."""
+    notes = 0
+    with os.scandir(blog / folder) as entries:
+        for count, entry in enumerate(entries, start=1):
+            if count >= MAX_KIND_FOLDER_ENTRIES:
+                return True
+            if (not entry.name.startswith(".") and NOTE_NAME_RE.fullmatch(entry.name)
+                    and not entry.is_dir(follow_symlinks=False)):
+                notes += 1
+    return notes >= MAX_NOTES_PER_KIND
+
+
+def _target_exists(blog: Path, verifier, target: str, data: bytes) -> CliError:
+    try:
+        same = _read(verifier, blog, target, MAX_NOTE_BYTES) == data
+    except CliError:
+        same = False
+    return CliError("proposal_target_exists", target, same=same)
+
+
+def accept_proposal(blog: Path, pid: str, digest: str, verifier) -> dict:
+    """Move .blogkit/pending/<pid>.md to its kind folder as <pid>.md, never over a file."""
+    relative = f"{PENDING_FOLDER}/{pid}.md"
+    refuse_symlinks(blog, relative)
+    if not os.path.lexists(blog / relative):
+        raise CliError("proposal_missing", relative)
+    data = _read(verifier, blog, relative, MAX_NOTE_BYTES)
+    if _sha256(data) != digest:
+        raise CliError("proposal_digest_mismatch", relative)
+    kind, _ = parse_proposal(data, relative, verifier)
+    folder = PROPOSAL_FOLDERS[kind]
+    leftover = _kind_folder(blog, folder, pid)
+    target = f"{folder}/{pid}.md"
+    refuse_symlinks(blog, target)
+    if os.path.lexists(blog / target):
+        raise _target_exists(blog, verifier, target, data)
+    if _kind_full(blog, folder):
+        raise CliError("proposal_kind_full", folder)
+    temp = blog / folder / f".{pid}.md.tmp"
+    try:
+        _write_new(temp, data)
+        os.link(temp, blog / target)
+    except FileExistsError:
+        temp.unlink(missing_ok=True)
+        raise _target_exists(blog, verifier, target, data) from None
+    except OSError:
+        temp.unlink(missing_ok=True)
+        raise CliError("proposal_write_failed", target) from None
+    temp.unlink()
+    (blog / relative).unlink()
+    return {"id": pid, "kind": kind, "target": target, "digest": digest, "removed": relative,
+            "leftover_removed": leftover}
 
 
 def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
