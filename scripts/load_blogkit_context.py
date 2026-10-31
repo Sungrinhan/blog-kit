@@ -462,7 +462,8 @@ def main(argv: list[str] | None = None) -> int:
     except Stop as exc:
         report["skipped"] = getattr(exc, "skipped", [])
         report["errors"] = [exc.error()]
-    except Exception:  # noqa: BLE001 - any other failure stops the load; never print why (it may hold text)
+    except Exception:  # noqa: BLE001 - loader top level: expected failures are Stop codes above; any other
+        # (a bundled module that does not load or raises) exports nothing and never prints why (it may hold text)
         report["errors"] = [{"code": "context_load_failed", "path": ""}]
     if not report["nonce"]:  # the upstream helper did not load; the marker still needs a fresh nonce
         report["nonce"] = secrets.token_hex(16)

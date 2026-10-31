@@ -782,3 +782,27 @@ def test_a_cross_review_that_cannot_be_judged_stops_the_load(world: World, setup
     assert rc == 1 and _codes(summary) == [code], output
     _nothing_exported(body, output)
     assert "fake body cross review" not in output
+
+
+def test_an_unexpected_failure_in_a_bundled_module_stops_with_a_fixed_code_and_prints_nothing(
+        world: World, tmp_path: Path) -> None:
+    # A copy of the install whose confidential checker raises an unexpected error carrying planted text.
+    install = tmp_path / "install"
+    for relative in ("scripts/load_blogkit_context.py", "scripts/load_untrusted_root.py",
+                     "adapters/astro/blogkit.py", "adapters/astro/blogkit_verify.py"):
+        (install / relative).parent.mkdir(parents=True, exist_ok=True)
+        (install / relative).write_bytes((ROOT / relative).read_bytes())
+    (install / "scripts" / "confidential_check.py").write_text(
+        "class Blocked(Exception):\n    code = 'x'\n\n\n"
+        f"def load_terms():\n    raise RuntimeError({FAKE_TERM!r} + ' fake body')\n", encoding="utf-8")
+    world.write("BRAND.md", "fake body\n")
+    env = {**os.environ, "HOME": str(world.home)}
+    result = subprocess.run([sys.executable, str(install / "scripts" / "load_blogkit_context.py"),
+                             "--blog-repo", str(world.blog), "--bundle", "memo", "--slug", SLUG],
+                            capture_output=True, text=True, env=env, cwd=world.blog, timeout=60)
+    found = list(SUMMARY_RE.finditer(result.stdout))
+    assert result.returncode == 1 and len(found) == 1, result.stdout + result.stderr
+    summary = json.loads(result.stdout[found[0].end():])
+    assert summary["status"] == "fail" and _codes(summary) == ["context_load_failed"]
+    assert result.stderr == "" and FAKE_TERM not in result.stdout
+    _nothing_exported(result.stdout[:found[0].start()], result.stdout)

@@ -37,6 +37,7 @@ INTERVIEW_SKILL = SKILLS / "blog-interview" / "SKILL.md"
 INTERVIEW_REFS = SKILLS / "blog-interview" / "references"
 DECISION_RECORD = INTERVIEW_REFS / "decision-record.md"
 LEARN_SKILL = SKILLS / "blog-learn" / "SKILL.md"
+LEARN_FORMATS = SKILLS / "blog-learn" / "references" / "learning-formats.md"
 ENGINE = ROOT / "adapters" / "astro" / "blogkit.py"
 VERIFIER = ROOT / "adapters" / "astro" / "blogkit_verify.py"
 
@@ -91,16 +92,37 @@ def test_pipeline_skill_frontmatter_matches_the_fork_skill_shape(name):
     assert validate_frontmatter(fields) == []
 
 
+def _token_estimate(text: str) -> int:
+    """A conservative token count: one per Hangul syllable, one per four other non-space characters."""
+    hangul = len(re.findall(r"[\uac00-\ud7a3]", text))
+    other = re.sub(r"[\uac00-\ud7a3]|\s", "", text)
+    return hangul + len(other) // 4
+
+
+@pytest.mark.parametrize("name", PIPELINE_SKILLS)
+def test_pipeline_skill_stays_within_the_skill_size_rule(name):
+    # CLAUDE.md: SKILL.md under 500 lines / 5000 tokens; new reference files under 200 lines.
+    # validate_skills counts whitespace words, which undercounts Korean, so this uses the estimate above.
+    text = (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
+    assert len(text.splitlines()) <= 500
+    assert _token_estimate(text) <= 5000, _token_estimate(text)
+    for path in sorted((SKILLS / name / "references").glob("*.md")):
+        assert len(path.read_text(encoding="utf-8").splitlines()) < 200, path.name
+
+
 @pytest.mark.parametrize("name", PIPELINE_SKILLS)
 def test_pipeline_skill_runs_engine_and_loader_from_the_installed_path(name):
     _, body = _parts(SKILLS / name / "SKILL.md")
     assert ENGINE_CALL in body and LOADER_CALL in body
-    # Every mention of either script is the installed one; no override directory or checkout.
-    for script in ("blogkit.py", "load_blogkit_context.py"):
-        for match in re.finditer(rf"\S*{re.escape(script)}\S*", body):
-            assert "${CLAUDE_SKILL_DIR}/../../" in match.group(0) or match.group(0).strip("`") == script, match.group(0)
-    assert "CLAUDE_BLOG_SCRIPTS_DIR:-" not in body
-    assert "load_untrusted_root.py" not in body
+    # Every mention of either script, in the skill or its references, is the installed one;
+    # no override directory or checkout.
+    for label, text in _skill_texts(name):
+        for script in ("blogkit.py", "load_blogkit_context.py"):
+            for match in re.finditer(rf"\S*{re.escape(script)}\S*", text):
+                assert ("${CLAUDE_SKILL_DIR}/../../" in match.group(0)
+                        or match.group(0).strip("`") == script), (label, match.group(0))
+        assert "CLAUDE_BLOG_SCRIPTS_DIR:-" not in text, label
+        assert "load_untrusted_root.py" not in text, label
 
 
 @pytest.mark.parametrize("name", PIPELINE_SKILLS)
@@ -193,6 +215,18 @@ def test_interview_skill_runs_the_steps_through_the_engine_and_loader():
     assert "/blog-learn <slug>" in texts
 
 
+def test_interview_research_step_never_loads_the_draft_bundle():
+    # Step 4 merges earlier claims from the review bundle (interview answers and claims only),
+    # and on a first run (no claims file) calls no loader at all.
+    _, body = _parts(INTERVIEW_SKILL)
+    research = body.split("## ④ 리서치", 1)[1].split("\n## ", 1)[0]
+    assert "--bundle draft" not in research
+    assert re.search(r"--bundle review(?![\w-])", research)
+    assert "첫 실행" in research and "이어서 하는 실행" in research
+    contracts = (INTERVIEW_REFS / "interview-contracts.md").read_text(encoding="utf-8")
+    assert "④에서는 review 묶음" in contracts
+
+
 def test_interview_skill_stops_at_the_third_p0_failure():
     texts = "\n".join(text for _, text in _skill_texts("blog-interview"))
     assert "세 번째 P0 실패" in texts
@@ -257,7 +291,9 @@ def test_learn_skill_learning_example_passes_the_engine_check():
     engine = _load("blogkit_learn_engine", ENGINE)
     verifier = _load("blogkit_learn_verifier", VERIFIER)
     _, body = _parts(LEARN_SKILL)
-    section = body.split("## 학습 결과 형식", 1)[1].split("\n## ", 1)[0]
+    assert '"${CLAUDE_SKILL_DIR}/references/learning-formats.md"' in body
+    formats = LEARN_FORMATS.read_text(encoding="utf-8")
+    section = formats.split("## 학습 결과 형식", 1)[1].split("\n## ", 1)[0]
     blocks = _fenced(section, "json")
     assert len(blocks) == 1
     data = _fill(blocks[0]).encode("utf-8")
@@ -271,7 +307,8 @@ def test_learn_skill_proposal_examples_pass_the_engine_parser():
     engine = _load("blogkit_learn_engine", ENGINE)
     verifier = _load("blogkit_learn_verifier", VERIFIER)
     _, body = _parts(LEARN_SKILL)
-    section = body.split("## 제안 파일 형식", 1)[1].split("\n## ", 1)[0]
+    formats = LEARN_FORMATS.read_text(encoding="utf-8")
+    section = formats.split("## 제안 파일 형식", 1)[1].split("\n## ", 1)[0]
     kinds = {}
     for block in _fenced(section, "markdown"):
         kind, fields = engine.parse_proposal(_fill(block).encode("utf-8") + b"\n", ".blogkit/pending/x.md", verifier)
@@ -285,7 +322,8 @@ def test_learn_skill_proposal_examples_pass_the_engine_parser():
 
 def test_learn_skill_shows_but_never_runs_approve_or_accept_proposal():
     _, body = _parts(LEARN_SKILL)
-    for block in _fenced(body, "bash"):
+    texts = "\n".join(text for _, text in _skill_texts("blog-learn"))
+    for block in _fenced(texts, "bash"):
         assert " approve " not in block and "accept-proposal" not in block, block
     shown = "\n".join(_fenced(body, "text"))
     assert re.search(r'blogkit\.py" approve "<slug>" --blog-repo "<blog repo>" --hash "<content_hash>" '
@@ -293,14 +331,14 @@ def test_learn_skill_shows_but_never_runs_approve_or_accept_proposal():
     assert re.search(r'blogkit\.py" accept-proposal "<ID>" --blog-repo "<blog repo>" --digest "<digest>"', shown)
     assert "accept-proposal <ID> --digest <digest>" in body
     assert "이 스킬은 `approve`와 `accept-proposal`을 실행하지 않는다" in body
-    assert "set -C" in body  # a proposal file is created, never written over
-    assert "sha256" in body
+    assert "set -C" in texts  # a proposal file is created, never written over
+    assert "sha256" in texts
 
 
 def test_learn_skill_never_calls_the_upstream_delivery_contract():
-    _, body = _parts(LEARN_SKILL)
+    texts = "\n".join(text for _, text in _skill_texts("blog-learn"))
     for name in UPSTREAM_DELIVERY:
-        assert name not in body, name
-    assert re.search(r"(?<![\w-])review\.md", body) is None
-    assert re.search(r"`blog-reviewer`", body) is None
-    assert "업스트림 전달 계약" in body and "부르지 않는다" in body
+        assert name not in texts, name
+    assert re.search(r"(?<![\w-])review\.md", texts) is None
+    assert re.search(r"`blog-reviewer`", texts) is None
+    assert "업스트림 전달 계약" in texts and "부르지 않는다" in texts

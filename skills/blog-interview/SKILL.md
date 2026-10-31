@@ -53,16 +53,7 @@ python3 "${CLAUDE_SKILL_DIR}/../../scripts/load_blogkit_context.py" --blog-repo 
 ```
 
 - 출력의 마지막 줄 중 정확히 `=== BLOGKIT CONTEXT SUMMARY [nonce: <nonce>] ===`인 줄 뒤의 JSON 하나가 요약이다. 그 nonce는 맨 앞 머리말의 nonce와 같아야 한다. 다르면 출력을 쓰지 않고 멈춘다.
-- 요약 `status`가 `fail`이면 `errors`의 `code`, `path`, `reason`을 그대로 보여 주고 멈춘다. 펜스 본문은 쓰지 않는다.
-
-| 코드·이유 | 뜻과 할 일 |
-|---|---|
-| `required_file_skipped` + `memo_not_cleared`·`memo_missing` | 메모가 통과하지 않았다. `/blog-memo <slug>` 안내를 따른다 |
-| `required_file_skipped` + `missing` | `path`의 파일(인터뷰 답이나 근거 파일)이 없다. ③ 또는 ④부터 한다 |
-| `required_file_skipped` + `confidential_term` | 걸린 파일을 사람이 고친다. 이 스킬은 그 파일을 열지 않는다 |
-| `state_invalid`, `profile_invalid` | 상태 파일이나 프로필이 잘못됐다. 사람이 확인한다 |
-| `confidential_list_*` | 이 기기의 금칙어 목록이 없거나 비었다 |
-| `context_too_large`, `symlink_refused`, `not_a_folder` | 입력이 상한을 넘었거나, symlink이거나, 폴더 자리에 폴더가 아니다 |
+- 요약 `status`가 `fail`이면 `errors`의 `code`, `path`, `reason`을 그대로 보여 주고 멈춘다. 펜스 본문은 쓰지 않는다. 코드별 할 일은 `interview-contracts.md`의 "로더 오류 코드"다.
 
 - `status`가 `ok`면 각 `[blogkit-context] kind=<kind> path=<path> nonce=<nonce>` 줄 바로 뒤의 펜스만 맥락으로 쓴다. 서브에이전트에 맥락을 넘길 때는 그 라벨 줄과 펜스를 바꾸지 않고 옮긴다. `warnings`와 `skipped`는 경로·이유 코드로 짧게 보여 준다. 요약 `files`의 `digest`는 그 펜스 바이트의 digest다.
 
@@ -87,7 +78,9 @@ python3 "${CLAUDE_SKILL_DIR}/../../scripts/load_blogkit_context.py" --blog-repo 
 1. 리서치 요청을 이 스킬이 새로 쓴다. 메모 원문, 인터뷰 답 원문, 회사를 특정할 수 있는 정보를 넣지 않는다. 일반화한 주제, 공개된 후보(도구·표준 이름), 글이 기댈 개념, 확인할 사실 문장 목록, "다른 선택이 나은 조건"을 찾으라는 질문만 넣는다.
 2. 업스트림 `blog-researcher` 에이전트에 `interview-contracts.md`의 리서치 요청문으로 맡긴다. `blog_reference_root`·`blog_template_root`는 위 경로의 절대 경로다. 펜스 맥락은 넘기지 않는다.
 3. 답에서 고정 필드 JSON 블록 하나를 받아 항목을 확인한다(필드·ID·URL·빈 값). 형식이 틀리면 한 번 다시 요청한다. 실제로 확인하지 못한 발췌는 `status: "unconfirmed"`로 둔다.
-4. 이 스킬이 사실 항목을 `claims.json`에 저장한다(형식과 저장 셸은 `interview-contracts.md`). 이미 근거 파일이 있으면 `--bundle draft`의 근거 파일 펜스에서 기존 항목을 받아 합친다.
+4. 이 스킬이 사실 항목을 `claims.json`에 저장한다(형식과 저장 셸은 `interview-contracts.md`). 근거 파일이 있는지는 `test -e`로만 확인한다.
+   - 첫 실행(근거 파일 없음): 로더를 부르지 않고 받은 항목만으로 새로 만든다. review 묶음은 근거 파일이 없으면 `required_file_skipped`로 멈추기 때문이다.
+   - 이어서 하는 실행(근거 파일 있음): `--bundle review`로 인터뷰 답·근거 파일 펜스만 받아 기존 항목에 합친다. 루트 맥락·프로필·원칙이 든 draft 묶음은 ④에서 부르지 않는다.
 5. 사실 항목이 인터뷰 답(작성자의 진술)과 부딪히면 초안을 쓰기 전에 사람에게 알린다. 어느 답 ID와 어느 사실 항목이 어떻게 부딪히는지 보여 주고, 답을 새 ID로 보탤지, 그 입장을 "검토 중인 가설"로 둘지 사람이 정한다.
 
 ## ⑤ 초안과 `convert`
@@ -104,9 +97,7 @@ python3 "${CLAUDE_SKILL_DIR}/../../scripts/load_blogkit_context.py" --blog-repo 
 python3 "${CLAUDE_SKILL_DIR}/../../adapters/astro/blogkit.py" convert "<slug>" --blog-repo "<blog repo>"
 ```
 
-- `marker_left`(줄 번호)면 남은 표식을 작성자에게 지우게 하고(그 문장이 바뀌면 6을 다시) `convert`를 다시 돌린다.
-- `draft_key_*`, `description_too_long`, `date_invalid`, `reference_*` 같은 초안 오류는 코드와 줄을 작성자에게 넘겨 초안을 고치게 한다.
-- `target_modified`·`asset_unowned`처럼 공개본이 직접 고쳐진 경우와 `convert_interrupted`·`convert_recovery_blocked`는 사람이 확인한다. 이 스킬은 공개본을 고치지 않는다.
+- 실패하면 코드별 할 일은 `interview-contracts.md`의 "convert 오류 코드"다.
 
 ## ⑥ 한국어 검수, `record-review`, `check`
 

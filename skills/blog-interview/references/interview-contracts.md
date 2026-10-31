@@ -2,6 +2,25 @@
 
 `/blog-interview` 스킬이 쓰는 파일 형식, 저장 셸, 서브에이전트 요청문이다. 꺾쇠(`<...>`) 자리는 실행 때 실제 값으로 바꾼다. 경로는 모두 절대 경로로 넘긴다.
 
+## 로더 오류 코드
+
+로더 요약 `status`가 `fail`일 때 `errors`의 코드별 할 일이다.
+
+| 코드·이유 | 뜻과 할 일 |
+|---|---|
+| `required_file_skipped` + `memo_not_cleared`·`memo_missing` | 메모가 통과하지 않았다. `/blog-memo <slug>` 안내를 따른다 |
+| `required_file_skipped` + `missing` | `path`의 파일(인터뷰 답이나 근거 파일)이 없다. ③ 또는 ④부터 한다 |
+| `required_file_skipped` + `confidential_term` | 걸린 파일을 사람이 고친다. 이 스킬은 그 파일을 열지 않는다 |
+| `state_invalid`, `profile_invalid` | 상태 파일이나 프로필이 잘못됐다. 사람이 확인한다 |
+| `confidential_list_*` | 이 기기의 금칙어 목록이 없거나 비었다 |
+| `context_too_large`, `symlink_refused`, `not_a_folder` | 입력이 상한을 넘었거나, symlink이거나, 폴더 자리에 폴더가 아니다 |
+
+## convert 오류 코드
+
+- `marker_left`(줄 번호)면 남은 표식을 작성자에게 지우게 하고(그 문장이 바뀌면 ⑤의 6을 다시) `convert`를 다시 돌린다.
+- `draft_key_*`, `description_too_long`, `date_invalid`, `reference_*` 같은 초안 오류는 코드와 줄을 작성자에게 넘겨 초안을 고치게 한다.
+- `target_modified`·`asset_unowned`처럼 공개본이 직접 고쳐진 경우와 `convert_interrupted`·`convert_recovery_blocked`는 사람이 확인한다. 이 스킬은 공개본을 고치지 않는다.
+
 ## 저장 공통
 
 - 비공개 파일을 쓰기 전에 그 파일과 위 두 폴더가 symlink가 아닌지 `test -L`로 확인한다. symlink면 `symlink_refused`를 보이고 멈춘다.
@@ -62,7 +81,7 @@ echo "interview_appended"
 ```
 
 - ④에서 저장할 때 `location`은 `미배치`다. ⑤의 연결 목록으로 채운다.
-- 근거 파일 전체를 이 스킬이 새로 만들어 통째로 바꾼다. 기존 항목은 draft 묶음의 근거 파일 펜스에서 받은 내용이다.
+- 근거 파일 전체를 이 스킬이 새로 만들어 통째로 바꾼다. 기존 항목은 ④에서는 review 묶음, ⑤에서는 draft 묶음의 근거 파일 펜스에서 받은 내용이다(첫 실행에는 기존 항목이 없다).
 
 ```bash
 CLAIMS="$BLOG/inbox/$SLUG/claims.json"

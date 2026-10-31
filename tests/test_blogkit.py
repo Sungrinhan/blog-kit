@@ -297,7 +297,7 @@ if mode == "noverdict":
     out.write_text("가짜 결과\\n판정 줄 없음 PLANTED\\n", encoding="utf-8")
     sys.exit(0)
 if mode == "big":
-    out.write_text("가" * (200 * 1024) + "\\nVERDICT: OK\\n", encoding="utf-8")
+    out.write_text("가" * (200 * 1024) + "\\nVERDICT: ISSUES\\n", encoding="utf-8")
     sys.exit(0)
 out.write_text(RESULT, encoding="utf-8")
 '''
@@ -3696,14 +3696,16 @@ def test_a_retry_that_succeeds_keeps_only_its_own_result(engine: Engine) -> None
     assert (engine.blog / CROSS_REVIEW).read_text(encoding="utf-8") == CODEX_RESULT
 
 
-def test_a_result_over_256_kb_is_cut_when_saved(engine: Engine) -> None:
+def test_a_result_over_256_kb_is_cut_when_saved_and_keeps_its_verdict_line(engine: Engine) -> None:
     _cross_reviewable(engine)
     engine.codex = {"version": 0, "runs": ["big"]}
     rc, payload, output = engine.run("cross-review", SLUG)
     assert rc == 0 and payload["cross_review"] == {"status": "done", "reason": None}, output
     data = (engine.blog / CROSS_REVIEW).read_bytes()
-    assert 256 * 1024 - 3 <= len(data) <= 256 * 1024
-    assert data.decode("utf-8").strip("가") == ""
+    assert 256 * 1024 - 64 <= len(data) <= 256 * 1024
+    lines = data.decode("utf-8").rstrip("\n").split("\n")
+    assert lines[-1] == "VERDICT: ISSUES"
+    assert lines[0].strip("가") == "" and len(lines) == 3 and lines[1] != "VERDICT: ISSUES"
 
 
 def test_a_post_change_while_codex_runs_records_nothing(engine: Engine) -> None:
