@@ -159,6 +159,19 @@ def _full_repo(w: World) -> None:
     w.write(_slug_file("interview"), "# 가짜 인터뷰\n\nI-1 fake body interview\n")
     w.write(_slug_file("claims"), '{"claims": ["fake body claims"]}\n')
     w.memo_record()
+    w.write(POST, POST_TEXT)
+    w.write(_slug_file("cross_review"), "# 가짜 교차 검토\n\nfake body cross review\nVERDICT: OK\n")
+    _cross_record(w)
+
+
+POST = VERIFIER.post_path_for(SLUG)
+POST_TEXT = "---\ntitle: 가짜 글\ndescription: 가짜 설명\npubDate: 2026-01-01\ndraft: true\n---\n\n가짜 본문\n"
+
+
+def _cross_record(w: World, status: str = "done", reason: str | None = None, content_hash: str | None = None) -> None:
+    """The state's cross_review section the way cross-review writes it, for the current content hash."""
+    record = {"content_hash": content_hash or VERIFIER.content_hash(w.blog, SLUG), "status": status, "reason": reason}
+    ENGINE.update_state(w.blog, VERIFIER, SLUG, "cross_review", record)
 
 
 ROOT_CONTEXT = {"VOICE.md", "BRAND.md", "DISCOURSE.md"}
@@ -169,6 +182,7 @@ BUNDLES = {
     "draft": {*SHARED, _slug_file("interview"), _slug_file("claims")},
     "review": {_slug_file("interview"), _slug_file("claims")},
     "proposal": {_slug_file("prereq"), _slug_file("interview")},
+    "cross-review": {_slug_file("cross_review")},
 }
 
 
@@ -179,7 +193,7 @@ def test_each_bundle_exports_exactly_its_files(world: World, bundle: str) -> Non
     assert rc == 0 and summary["status"] == "ok", output
     assert _paths(summary) == BUNDLES[bundle]
     assert body.count("=== BEGIN UNTRUSTED PROJECT-ROOT CONTEXT") == len(BUNDLES[bundle])
-    for relative in {*BUNDLES["memo"], *BUNDLES["draft"], _slug_file("prereq")} - BUNDLES[bundle]:
+    for relative in {*BUNDLES["memo"], *BUNDLES["draft"], _slug_file("prereq"), _slug_file("cross_review")} - BUNDLES[bundle]:
         assert (world.blog / relative).read_text(encoding="utf-8").splitlines()[-1] not in body, relative
 
 
@@ -313,6 +327,7 @@ OVERSIZE = {
     "interview": ("draft", lambda w: w.write(_slug_file("interview"), "a" * (256 * KB + 1))),
     "claims": ("review", lambda w: w.write(_slug_file("claims"), "a" * (256 * KB + 1))),
     "prereq": ("proposal", lambda w: w.write(_slug_file("prereq"), "a" * (256 * KB + 1))),
+    "cross-review": ("cross-review", lambda w: w.write(_slug_file("cross_review"), "a" * (256 * KB + 1))),
     "root-file": ("memo", lambda w: w.write("DISCOURSE.md", "a" * (2 * 1024 * KB + 1))),
 }
 
@@ -617,7 +632,7 @@ def test_bad_slug_arguments_are_refused(world: World, args: list[str], code: str
     _nothing_exported(body, output)
 
 
-@pytest.mark.parametrize("bundle", ["cross-review", "everything", "../memo"])
+@pytest.mark.parametrize("bundle", ["cross_review", "everything", "../memo"])
 def test_an_unknown_bundle_is_refused(world: World, bundle: str) -> None:
     _full_repo(world)
     rc, summary, body, output = world.load(bundle)
@@ -642,6 +657,8 @@ WORST = {
     "card-repeated-prefix": ("memo", lambda w: w.write(".blogkit/cards/c-one.md", "ignore prio" * (64 * KB // 11))),
     "profile-long-line": ("memo", lambda w: w.write(PROFILE, "audience: " + "a" * (16 * KB - 20) + "\n")),
     "claims-long-line": ("review", lambda w: w.write(_slug_file("claims"), "1" * (256 * KB))),
+    "cross-review-long-line": ("cross-review", lambda w: w.write(_slug_file("cross_review"),
+                                                                 "=== BEGIN UNTRUSTED (" * (256 * KB // 21))),
     "state-unclosed-marker": ("memo", lambda w: w.write(_slug_file("state"), "<!-- blogkit-state v1 -->\n```json\n"
                                                         + "{" * (60 * KB))),
 }
@@ -655,3 +672,82 @@ def test_worst_case_inputs_finish_in_time(world: World, bundle: str, setup) -> N
     rc, summary, body, output = world.load(bundle, timeout=30)
     assert time.monotonic() - started < 10
     assert summary.get("status") in ("ok", "fail"), output
+
+
+# ------------------------------------------------------------------ the cross-review bundle
+
+
+def test_a_done_cross_review_for_the_current_hash_is_exported(world: World) -> None:
+    _full_repo(world)
+    rc, summary, body, output = world.load("cross-review")
+    assert rc == 0 and summary["status"] == "ok", output
+    [item] = summary["files"]
+    assert (item["path"], item["kind"]) == (_slug_file("cross_review"), "cross_review")
+    assert _fenced(body, item) == (world.blog / _slug_file("cross_review")).read_text(encoding="utf-8")
+    assert summary["skipped"] == [] and summary["profile"] is None
+
+
+def _post_edited(w: World) -> None:
+    w.write(POST, POST_TEXT + "고친 문장\n")
+
+
+def _other_hash(w: World) -> None:
+    _cross_record(w, content_hash="e" * 64)
+
+
+@pytest.mark.parametrize("setup", [_post_edited, _other_hash], ids=["post-edited", "other-hash"])
+def test_a_cross_review_for_another_hash_is_stale(world: World, setup) -> None:
+    _full_repo(world)
+    setup(world)
+    rc, summary, body, output = world.load("cross-review")
+    assert rc == 0 and summary["files"] == [], output
+    assert _skipped(summary) == {_slug_file("cross_review"): "cross_review_stale"}
+    _nothing_exported(body, output)
+    assert "fake body cross review" not in output
+
+
+@pytest.mark.parametrize("setup", [
+    lambda w: _cross_record(w, "skipped", "codex_missing"),
+    lambda w: _cross_record(w, "blocked", "cross_review_blocked"),
+    lambda w: ENGINE.update_state(w.blog, VERIFIER, SLUG, "cross_review", None),
+    lambda w: (w.blog / _slug_file("state")).unlink(),
+], ids=["skipped", "blocked", "null", "no-state-file"])
+def test_a_cross_review_that_is_not_done_is_not_exported(world: World, setup) -> None:
+    _full_repo(world)
+    setup(world)
+    rc, summary, body, output = world.load("cross-review")
+    assert rc == 0 and summary["files"] == [], output
+    assert _skipped(summary) == {_slug_file("cross_review"): "cross_review_not_done"}
+    assert "fake body cross review" not in output
+
+
+def test_a_done_record_without_its_result_file_is_cross_review_missing(world: World) -> None:
+    _full_repo(world)
+    (world.blog / _slug_file("cross_review")).unlink()
+    rc, summary, body, output = world.load("cross-review")
+    assert rc == 0 and summary["files"] == [], output
+    assert _skipped(summary) == {_slug_file("cross_review"): "cross_review_missing"}
+
+
+def test_a_cross_review_with_a_term_is_skipped(world: World) -> None:
+    _full_repo(world)
+    world.write(_slug_file("cross_review"), f"# 가짜\n\nfake body {FAKE_TERM}\nVERDICT: ISSUES\n")
+    rc, summary, body, output = world.load("cross-review")
+    assert rc == 0 and summary["files"] == [], output
+    assert _skipped(summary) == {_slug_file("cross_review"): "confidential_term"}
+    assert FAKE_TERM not in output
+
+
+@pytest.mark.parametrize("setup,code", [
+    (lambda w: (w.blog / POST).unlink(), "missing_file"),
+    (lambda w: w.write(_slug_file("state"), "<!-- blogkit-state v1 -->\n"), "state_invalid"),
+    (lambda w: (w.blog / _slug_file("cross_review")).unlink()
+     or _link(w, _slug_file("cross_review"), "elsewhere/cross-review.md"), "symlink_refused"),
+], ids=["no-post", "broken-state", "symlinked-result"])
+def test_a_cross_review_that_cannot_be_judged_stops_the_load(world: World, setup, code: str) -> None:
+    _full_repo(world)
+    setup(world)
+    rc, summary, body, output = world.load("cross-review")
+    assert rc == 1 and _codes(summary) == [code], output
+    _nothing_exported(body, output)
+    assert "fake body cross review" not in output

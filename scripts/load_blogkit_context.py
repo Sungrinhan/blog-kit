@@ -23,9 +23,18 @@ Bundles (the spec's step input table; every current bundle needs --slug):
                 claims. Required: both.
     proposal    step 10 (proposals): prerequisite record, interview answers.
                 Required: interview. A missing prerequisite record warns.
+    cross-review  step 7 (reading the Codex cross-review): the cross-review
+                result only, and only while the state file's cross_review
+                is done for the current content hash (the installed
+                verifier's content_hash()). Otherwise the result is not
+                read and is skipped as cross_review_not_done (skipped,
+                blocked or null) or cross_review_stale (another hash);
+                cross_review_missing when a done record has no result file.
+                Nothing is required: a skipped result is a normal outcome
+                of an optional step. A broken state file or a public copy
+                whose hash cannot be computed stops the load.
 
-The cross-review bundle (step 7) is reserved for the cross-review ticket and
-is not accepted yet. A profile that is present is required too: when it is
+A profile that is present is required too: when it is
 skipped (a term, not UTF-8) the load stops; when it is absent the defaults
 apply with a profile_missing warning.
 
@@ -36,8 +45,8 @@ Allowed files, all read from the blog repo given by --blog-repo:
     .blogkit/profile.yaml              16 KB
     .blogkit/principles/<ID>.md        64 KB each, at most 200
     .blogkit/cards/<ID>.md             64 KB each, at most 200
-    inbox/<slug>/memo.md, prereq.md, interview.md, claims.json
-                                       256 KB each, paths from the verifier's
+    inbox/<slug>/memo.md, prereq.md, interview.md, claims.json,
+    cross-review.md                    256 KB each, paths from the verifier's
                                        inbox_file()
 
 Principles and cards are the direct entries of their folder: a name starting
@@ -137,6 +146,7 @@ BUNDLES = {
     "draft": (("root", "profile", "principle", "interview", "claims"), ("interview", "claims")),
     "review": (("interview", "claims"), ("interview", "claims")),
     "proposal": (("prereq", "interview"), ("interview",)),
+    "cross-review": (("cross_review",), ()),
 }
 
 PROFILE_DEFAULTS = {"language": "ko", "audience": "한국어 개발자", "default_template": "decision-record",
@@ -331,6 +341,25 @@ class Loader:
         if text is not None:
             self._export("memo", relative, text)
 
+    def _cross_review(self) -> None:
+        """The cross-review result, only for a done record bound to the current content hash."""
+        relative = self.verifier.inbox_file(self.slug, "cross_review")
+        try:
+            record = self.engine.read_state(self.blog, self.verifier, self.slug)["cross_review"]
+        except self.engine.CliError as exc:
+            raise Stop(exc.code, exc.path) from None
+        if not isinstance(record, dict) or record.get("status") != "done":
+            self._skip(relative, "cross_review_not_done")
+            return
+        try:
+            current = self.verifier.content_hash(self.blog, self.slug)
+        except self.verifier.VerifyError as exc:
+            raise Stop(exc.code, exc.path) from None
+        if record.get("content_hash") != current:
+            self._skip(relative, "cross_review_stale")
+            return
+        self._one("cross_review", relative, SLUG_FILE_CAP, missing="cross_review_missing")
+
     def collect(self) -> None:
         parts, required = BUNDLES[self.bundle]
         try:
@@ -348,6 +377,8 @@ class Loader:
                 self._folder(part)
             elif part == "memo":
                 self._memo()
+            elif part == "cross_review":
+                self._cross_review()
             else:
                 relative = self.verifier.inbox_file(self.slug, part)
                 self._one(part, relative, SLUG_FILE_CAP)

@@ -89,7 +89,15 @@ def fake_open(self, request, data=None, timeout=None):
 socket.getaddrinfo = getaddrinfo
 urllib.request.OpenerDirector.open = fake_open
 sys.argv = [cli, *sys.argv[4:]]
-runpy.run_path(cli, run_name="__main__")
+# The CLI is loaded as a module so the Codex app bundle path and the Codex time limit can point at
+# test values first: no test ever reaches a real Codex install.
+import importlib.util
+spec = importlib.util.spec_from_file_location("blogkit_cli", cli)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.CODEX_APP_PATHS = tuple(table["codex"]["app_paths"])
+module.CODEX_TIMEOUT = table["codex"]["timeout"]
+sys.exit(module.main())
 '''
 
 
@@ -142,6 +150,12 @@ class Engine:
         self.preview = dict(DEFAULT_PREVIEW)
         self.net = {"hosts": {}, "answers": {}}
         self.timeout = 120.0
+        # Stub codex: its --version exit code and one mode per exec run (the last one repeats), and
+        # whether it is on PATH. The app bundle paths the engine tries next are fake ones.
+        self.codex = {"version": 0, "runs": ["ok"]}
+        self.codex_on_path = True
+        self.codex_app = [str(tmp / "no-codex-app" / "codex")]
+        self.codex_timeout = 600.0
 
     def _stubs(self) -> None:
         out = self.tmp / "claude-out.json"
@@ -212,7 +226,12 @@ class Engine:
             for tool in ("cat", "mkdir", "cp"):
                 if not (sysbin / tool).exists():
                     (sysbin / tool).symlink_to(shutil.which(tool))
-        (self.tmp / "net.json").write_text(json.dumps(self.net))
+        (self.bin / "codex").unlink(missing_ok=True)
+        (self.tmp / "codex-modes.json").write_text(json.dumps({**self.codex, "blog": str(self.blog)}))
+        if self.codex_on_path:
+            _codex_stub(self.bin / "codex", self.tmp)
+        (self.tmp / "net.json").write_text(json.dumps(
+            {**self.net, "codex": {"app_paths": self.codex_app, "timeout": self.codex_timeout}}))
         netfake = self.tmp / "netfake.py"
         netfake.write_text(NETFAKE)
         wrapper = self.tmp / "run-netfake.py"
@@ -239,6 +258,55 @@ class Engine:
         except json.JSONDecodeError:
             payload = {}
         return result.returncode, payload, result.stdout + result.stderr
+
+
+CODEX_RESULT = "# 가짜 교차 검토\n\n가짜 지적 하나.\nVERDICT: ISSUES\n"
+# Stub codex: records each exec call (arguments, cwd, the work folder and every file in it with its
+# digest) in codex-calls.json, then acts by mode. It always prints the planted secret on both streams.
+CODEX_STUB = '''\
+import hashlib, json, os, sys, time
+from pathlib import Path
+
+tmp = Path(TMP)
+modes = json.loads((tmp / "codex-modes.json").read_text(encoding="utf-8"))
+print("stdout PLANTED")
+print("stderr PLANTED", file=sys.stderr)
+if sys.argv[1:] == ["--version"]:
+    with open(tmp / "codex-version-calls.txt", "a", encoding="utf-8") as handle:
+        handle.write(sys.argv[0] + "\\n")
+    sys.exit(modes["version"])
+calls_path = tmp / "codex-calls.json"
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+mode = modes["runs"][min(len(calls), len(modes["runs"]) - 1)]
+args = sys.argv[1:]
+work = Path(args[args.index("-C") + 1])
+out = Path(args[args.index("-o") + 1])
+files = {p.relative_to(work).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+         for p in sorted(work.rglob("*")) if p.is_file()}
+calls.append({"args": args, "cwd": os.getcwd(), "work": str(work), "files": files, "mode": mode})
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+if mode == "timeout":
+    time.sleep(60)
+if mode == "edit":
+    with open(Path(modes["blog"]) / "src/content/posts/first-post.md", "a", encoding="utf-8") as handle:
+        handle.write("edited while codex ran\\n")
+if mode == "fail":
+    out.write_text("가짜 실패 결과 PLANTED\\nVERDICT: OK\\n", encoding="utf-8")
+    sys.exit(3)
+if mode == "noverdict":
+    out.write_text("가짜 결과\\n판정 줄 없음 PLANTED\\n", encoding="utf-8")
+    sys.exit(0)
+if mode == "big":
+    out.write_text("가" * (200 * 1024) + "\\nVERDICT: OK\\n", encoding="utf-8")
+    sys.exit(0)
+out.write_text(RESULT, encoding="utf-8")
+'''
+
+
+def _codex_stub(path: Path, tmp: Path) -> None:
+    text = CODEX_STUB.replace("TMP", repr(str(tmp))).replace("RESULT", repr(CODEX_RESULT))
+    path.write_text(f"#!{sys.executable}\n" + text.replace("PLANTED", PLANTED), encoding="utf-8")
+    path.chmod(0o755)
 
 
 @pytest.fixture
@@ -1385,8 +1453,8 @@ def test_recovery_that_cannot_be_judged_changes_nothing(engine: Engine, count: i
 @pytest.mark.parametrize("command", [
     ["check", SLUG], ["status", SLUG], ["publish", SLUG],
     ["approve", SLUG, "--hash", "0" * 64, "--warnings", "0" * 64], ["record-review", SLUG],
-    ["record-learning", SLUG],
-], ids=["check", "status", "publish", "approve", "record-review", "record-learning"])
+    ["record-learning", SLUG], ["cross-review", SLUG],
+], ids=["check", "status", "publish", "approve", "record-review", "record-learning", "cross-review"])
 def test_other_commands_refuse_an_interrupted_slug(engine: Engine, command: list[str]) -> None:
     _stopped_reconvert(engine, 5)
     before = _tree(engine)
@@ -3449,10 +3517,212 @@ def test_the_automatic_steps_leave_only_the_human_approval(engine: Engine) -> No
     _review(engine)
     rc, _, output = engine.run("check", SLUG)
     assert rc == 0, output
-    # cross-review (M2c-09) goes here.
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert (rc, payload["cross_review"]) == (0, {"status": "done", "reason": None}), output
     _write_learning(engine, _learning_doc(engine))
     rc, payload, output = engine.run("record-learning", SLUG)
     assert (rc, payload["passed"]) == (0, True), output
     rc, status, output = engine.run("status", SLUG)
     assert rc == 0 and status["missing"] == ["approval_missing"], output
     assert _state_block(engine)["memo"]["confirmed"] is True
+
+
+# ------------------------------------------------------------------ cross-review
+
+
+CROSS_REVIEW = f"inbox/{SLUG}/cross-review.md"
+OLD_CROSS_REVIEW = "# 지난 교차 검토\n\nVERDICT: OK\n"
+CODEX_FLAGS = ["exec", "-s", "read-only", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
+               "--ephemeral"]
+
+
+def _cross_reviewable(engine: Engine) -> None:
+    """A converted copy, the claims file, the term list and a result left by an earlier run."""
+    _checkable(engine)
+    _inputs(engine)
+    (engine.blog / CROSS_REVIEW).write_text(OLD_CROSS_REVIEW, encoding="utf-8")
+
+
+def _codex_calls(engine: Engine) -> list[dict]:
+    path = engine.tmp / "codex-calls.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+def _sent_files(engine: Engine) -> dict[str, str]:
+    """What the work folder should hold: the public copy, its assets and the claims file, by digest."""
+    sent = {POST: _file_sha(engine, POST), "claims.json": _file_sha(engine, CLAIMS)}
+    for path in sorted((engine.blog / ASSETS).iterdir()):
+        sent[f"{ASSETS}/{path.name}"] = _sha(path.read_bytes())
+    return sent
+
+
+def _cross_state(engine: Engine) -> dict:
+    return _state_block(engine)["cross_review"]
+
+
+def test_cross_review_runs_codex_read_only_on_the_checked_bytes_only(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    evidence = (engine.blog / EVIDENCE).read_bytes()
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 0 and payload["cross_review"] == {"status": "done", "reason": None}, output
+    calls = _codex_calls(engine)
+    assert len(calls) == 1
+    args, work = calls[0]["args"], Path(calls[0]["work"])
+    assert args[:7] == CODEX_FLAGS
+    assert args[7] == "-C" and Path(args[8]) == work
+    assert args[9] == "-o" and Path(args[10]).parent == work
+    assert "VERDICT: OK" in args[11] and "VERDICT: ISSUES" in args[11] and len(args) == 12
+    assert not work.is_relative_to(engine.blog) and not work.exists()
+    assert calls[0]["files"] == _sent_files(engine)
+    assert {"diagram.png", "logo.svg"} <= {Path(name).name for name in calls[0]["files"]}
+    assert (engine.blog / CROSS_REVIEW).read_text(encoding="utf-8") == CODEX_RESULT
+    assert _cross_state(engine) == {"content_hash": _verifier().content_hash(engine.blog, SLUG),
+                                    "status": "done", "reason": None}
+    assert (engine.blog / EVIDENCE).read_bytes() == evidence
+    _no_leak(output)
+    assert set(payload) == {"status", "command", "cross_review", "errors"}
+
+
+@pytest.mark.parametrize("target", ["post", "svg", "claims"])
+def test_a_term_in_any_input_blocks_without_running_codex(engine: Engine, target: str) -> None:
+    _cross_reviewable(engine)
+    if target == "post":
+        _append_post(engine, f"가짜 문장 {FAKE_TERM}\n")
+        relative, line = POST, POST_LINES + 1
+    elif target == "svg":
+        relative, line = f"{ASSETS}/logo.svg", 2
+        (engine.blog / relative).write_bytes(SVG + f"<!-- {FAKE_TERM} -->\n".encode("utf-8"))
+    else:
+        relative, line = CLAIMS, 1
+        _inputs(engine, claims={"claims": [{**FACT, "claim": f"가짜 {FAKE_TERM}"}]})
+    evidence = (engine.blog / EVIDENCE).read_bytes()
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 1 and _codes(payload) == ["cross_review_blocked"], output
+    assert payload["blocks"] == [{"path": relative, "line": line, "category": "confidential_term"}]
+    assert payload["cross_review"] == {"status": "blocked", "reason": "cross_review_blocked"}
+    assert _codex_calls(engine) == [] and not (engine.tmp / "codex-version-calls.txt").exists()
+    assert not (engine.blog / CROSS_REVIEW).exists()
+    assert _cross_state(engine)["status"] == "blocked"
+    assert (engine.blog / EVIDENCE).read_bytes() == evidence
+    assert FAKE_TERM not in output
+    _no_leak(output)
+
+
+def test_no_codex_on_path_or_in_the_app_bundle_is_skipped_without_a_retry(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    engine.codex_on_path = False
+    engine.isolated_path = True
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 0 and payload["cross_review"] == {"status": "skipped", "reason": "codex_missing"}, output
+    assert not (engine.blog / CROSS_REVIEW).exists()
+    assert _cross_state(engine) == {"content_hash": _verifier().content_hash(engine.blog, SLUG),
+                                    "status": "skipped", "reason": "codex_missing"}
+
+
+def test_a_codex_whose_version_fails_counts_as_missing(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    engine.codex = {"version": 1, "runs": ["ok"]}
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 0 and payload["cross_review"] == {"status": "skipped", "reason": "codex_missing"}, output
+    assert _codex_calls(engine) == []
+    assert (engine.tmp / "codex-version-calls.txt").read_text().count("\n") == 1
+    assert not (engine.blog / CROSS_REVIEW).exists()
+    _no_leak(output)
+
+
+def test_the_app_bundle_codex_is_used_when_path_has_none(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    engine.isolated_path = True
+    engine.codex_on_path = False
+    app = engine.tmp / "app" / "codex"
+    app.parent.mkdir()
+    _codex_stub(app, engine.tmp)
+    engine.codex_app = [str(engine.tmp / "missing-app" / "codex"), str(app)]
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 0 and payload["cross_review"] == {"status": "done", "reason": None}, output
+    assert len(_codex_calls(engine)) == 1
+
+
+@pytest.mark.parametrize("mode,reason", [("fail", "codex_failed"), ("noverdict", "codex_no_verdict"),
+                                         ("timeout", "codex_timeout")])
+def test_a_failing_codex_is_tried_twice_then_skipped(engine: Engine, mode: str, reason: str) -> None:
+    _cross_reviewable(engine)
+    engine.codex = {"version": 0, "runs": [mode]}
+    engine.codex_timeout = 2.0
+    evidence = (engine.blog / EVIDENCE).read_bytes()
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 0 and payload["cross_review"] == {"status": "skipped", "reason": reason}, output
+    calls = _codex_calls(engine)
+    assert len(calls) == 2
+    assert all(call["files"] == _sent_files(engine) for call in calls)
+    assert not any(Path(call["work"]).exists() for call in calls)
+    assert not (engine.blog / CROSS_REVIEW).exists()
+    assert _cross_state(engine)["status"] == "skipped" and _cross_state(engine)["reason"] == reason
+    assert (engine.blog / EVIDENCE).read_bytes() == evidence
+    _no_leak(output)
+    assert "가짜 실패 결과" not in output and "판정 줄 없음" not in output
+
+
+def test_a_retry_that_succeeds_keeps_only_its_own_result(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    engine.codex = {"version": 0, "runs": ["fail", "ok"]}
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 0 and payload["cross_review"] == {"status": "done", "reason": None}, output
+    calls = _codex_calls(engine)
+    assert len(calls) == 2
+    assert all(call["files"] == _sent_files(engine) for call in calls)
+    assert (engine.blog / CROSS_REVIEW).read_text(encoding="utf-8") == CODEX_RESULT
+
+
+def test_a_result_over_256_kb_is_cut_when_saved(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    engine.codex = {"version": 0, "runs": ["big"]}
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 0 and payload["cross_review"] == {"status": "done", "reason": None}, output
+    data = (engine.blog / CROSS_REVIEW).read_bytes()
+    assert 256 * 1024 - 3 <= len(data) <= 256 * 1024
+    assert data.decode("utf-8").strip("가") == ""
+
+
+def test_a_post_change_while_codex_runs_records_nothing(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    engine.codex = {"version": 0, "runs": ["edit"]}
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 1 and _codes(payload) == ["content_changed_during_check"], output
+    assert not (engine.blog / CROSS_REVIEW).exists()
+    assert not (engine.blog / STATE).exists()
+    assert not Path(_codex_calls(engine)[0]["work"]).exists()
+
+
+@pytest.mark.parametrize("change,code", [
+    (lambda e: (e.blog / CLAIMS).unlink(), "claims_missing"),
+    (lambda e: (e.blog / CLAIMS).write_bytes(b"\xff\xfe"), "cross_review_input_not_utf8"),
+    (lambda e: (e.blog / POST).unlink(), "missing_file"),
+], ids=["no-claims", "claims-not-utf8", "no-post"])
+def test_inputs_that_cannot_be_read_run_nothing(engine: Engine, change, code: str) -> None:
+    _cross_reviewable(engine)
+    change(engine)
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 1 and _codes(payload) == [code], output
+    assert _codex_calls(engine) == []
+    assert not (engine.blog / CROSS_REVIEW).exists()
+
+
+def test_a_symlinked_result_path_is_refused(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    (engine.blog / CROSS_REVIEW).unlink()
+    outside = engine.tmp / "outside.md"
+    outside.write_text("keep\n")
+    (engine.blog / CROSS_REVIEW).symlink_to(outside)
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 1 and _codes(payload) == ["symlink_refused"], output
+    assert outside.read_text() == "keep\n" and _codex_calls(engine) == []
+
+
+def test_cross_review_takes_the_slug_lock(engine: Engine) -> None:
+    _cross_reviewable(engine)
+    held = json.dumps({"pid": os.getpid(), "host": socket.gethostname()})
+    (engine.blog / LOCK).write_text(held)
+    rc, payload, output = engine.run("cross-review", SLUG)
+    assert rc == 1 and _codes(payload) == ["slug_locked"], output
+    assert (engine.blog / CROSS_REVIEW).read_text(encoding="utf-8") == OLD_CROSS_REVIEW
