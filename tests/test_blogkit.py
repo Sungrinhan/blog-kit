@@ -3507,17 +3507,36 @@ def test_the_learning_parser_stays_fast_on_worst_case_input(engine: Engine, text
 
 
 def test_the_automatic_steps_leave_only_the_human_approval(engine: Engine) -> None:
-    """memo-check (warnings, then --confirm), convert, record-review, check, record-learning, status."""
-    _ready_memo(engine, WARNING_MEMO)
+    """memo-check (warnings, then --confirm), memo bundle, convert, review bundle, record-review, check,
+    cross-review, record-learning, status. The review result's inputs are the loader's digests, as in the skill."""
+    memo = _ready_memo(engine, WARNING_MEMO)
     rc, payload, output = engine.run("memo-check", SLUG)
     assert (rc, payload["cleared"]) == (0, False), output
+    rc, loaded, summary = _run_loader(engine, "memo")
+    assert rc == 1 and summary["errors"] == [
+        {"code": "required_file_skipped", "path": MEMO, "reason": "memo_not_cleared"}], loaded
     rc, payload, output = engine.run("memo-check", SLUG, "--confirm", payload["warnings_digest"])
     assert (rc, payload["cleared"]) == (0, True), output
+    rc, loaded, summary = _run_loader(engine, "memo")
+    assert rc == 0 and WARNING_MEMO in loaded, loaded
+    assert [(f["kind"], f["path"], f["digest"]) for f in summary["files"] if f["kind"] == "memo"] == [
+        ("memo", MEMO, _sha(memo.read_bytes()))], summary
     (engine.blog / ".gitignore").write_text(f"{PREVIEW_DIR}/\n")
     _draft(engine)
     rc, _, output = engine.run("convert", SLUG)
     assert rc == 0, output
-    _review(engine)
+    _inputs(engine)
+    rc, loaded, summary = _run_loader(engine, "review")
+    assert rc == 0, loaded
+    digests = {f["kind"]: f["digest"] for f in summary["files"]}
+    assert sorted(digests) == ["claims", "interview"], summary
+    rc, status, output = engine.run("status", SLUG)
+    assert rc == 0, output
+    _write_review(engine, {"content_hash": status["content_hash"], "findings": [_finding(99, "P3")],
+                           "inputs": {"interview_digest": digests["interview"],
+                                      "claims_digest": digests["claims"]}})
+    rc, _, output = engine.run("record-review", SLUG)
+    assert rc == 0, output
     rc, _, output = engine.run("check", SLUG)
     assert rc == 0, output
     rc, payload, output = engine.run("cross-review", SLUG)
@@ -3989,19 +4008,25 @@ def test_a_stop_after_the_link_shows_as_an_existing_target(engine: Engine) -> No
     assert _dotfiles(engine, PRINCIPLES) == []
 
 
-def _load_context(engine: Engine) -> dict:
-    """The context loader's summary for the draft bundle (which reads principles) in this blog repo."""
-    _terms_file(engine)
-    _inputs(engine)
+def _run_loader(engine: Engine, bundle: str) -> tuple[int, str, dict]:
+    """Run the context loader on this blog repo the way the skills do; exit code, output, summary."""
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
     env["HOME"] = str(engine.home)
     result = subprocess.run(
-        [sys.executable, str(LOADER), "--blog-repo", str(engine.blog), "--bundle", "draft", "--slug", SLUG],
+        [sys.executable, str(LOADER), "--blog-repo", str(engine.blog), "--bundle", bundle, "--slug", SLUG],
         capture_output=True, text=True, env=env, cwd=engine.tmp, timeout=60,
     )
     marker = result.stdout.rindex("=== BLOGKIT CONTEXT SUMMARY")
     summary = json.loads(result.stdout[result.stdout.index("\n", marker):])
-    assert result.returncode == 0, result.stdout + result.stderr
+    return result.returncode, result.stdout + result.stderr, summary
+
+
+def _load_context(engine: Engine) -> dict:
+    """The context loader's summary for the draft bundle (which reads principles) in this blog repo."""
+    _terms_file(engine)
+    _inputs(engine)
+    rc, output, summary = _run_loader(engine, "draft")
+    assert rc == 0, output
     return summary
 
 

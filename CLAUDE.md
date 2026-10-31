@@ -22,6 +22,7 @@ prose hygiene via `scripts/lint_prose.py` (v1.8.4+), and the 5-gate Blog Deliver
 claude-blog/
   CLAUDE.md                          # Project instructions (this file)
   docs/CONTRIBUTORS.md               # Pro Hub Challenge attribution and integration decisions
+  docs/BLOG-KIT-PIPELINE.md          # blog-kit pipeline order and .blogkit/profile.yaml example (fork)
   CHANGELOG.md                       # Keep a Changelog format
   .claude-plugin/plugin.json         # Plugin manifest (v2.3.1)
   .claude-plugin/marketplace.json    # Marketplace catalog for distribution (claude-blog + optional blog-studio)
@@ -29,7 +30,7 @@ claude-blog/
   .mcp.example.json                  # MCP config example (tracked; .mcp.json is gitignored)
   pyproject.toml                     # Python packaging (3.11+)
   brain/                             # Vendored self-contained evidence-gated Obsidian brain; not plugin payload; tooling stays under skills/
-  adapters/astro/blogkit.py          # blog-kit engine CLI: convert, publish gates, approve, publish (fork)
+  adapters/astro/blogkit.py          # blog-kit engine CLI: convert, publish gates, approve, publish, memo-check, record-review, record-learning, cross-review, accept-proposal (fork)
   adapters/astro/blogkit_verify.py   # Publish verifier, canonical copy synced into the blog repo (fork)
   adapters/astro/blogkit_links.py    # External link checker for publish gate 6 (fork)
   scripts/analyze_blog.py            # 5-category quality scoring (stdlib)
@@ -56,7 +57,8 @@ claude-blog/
   scripts/installer_ownership.py     # Shared Unix installer ownership engine
   scripts/doctor.py                  # blog-kit install doctor (fork)
   scripts/confidential_check.py      # Per-machine confidential-term check, no raw output (fork)
-  # 24 scripts/*.py in total: `ls scripts/*.py | wc -l`
+  scripts/load_blogkit_context.py    # M2c context loader: allowed private files, term-checked and fenced (fork)
+  # 25 scripts/*.py in total: `ls scripts/*.py | wc -l`
   skills/                            # 36 skill directories (1 orchestrator + 31 sub-skills + blog-doctor + blog-memo + blog-interview + blog-learn)
     blog/SKILL.md                   # Main orchestrator, routing, scoring
       references/                   # 22 on-demand knowledge files (5 in v1.8.0, 1 in v1.9.0)
