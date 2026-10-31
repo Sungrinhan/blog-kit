@@ -24,10 +24,10 @@ def skill(**updates):
 def test_maintained_bundle_uses_one_yaml_and_policy_validator():
     assert validate_bundle(ROOT) == []
     values = {path.parent.name: parse_frontmatter(path.read_text())["user-invocable"] for path in (ROOT / "skills").glob("*/SKILL.md")}
-    # Fork: upstream ships 32 skill directories; blog-kit adds blog-doctor, blog-memo and blog-interview.
-    assert len(values) == 35
+    # Fork: upstream ships 32 skill directories; blog-kit adds blog-doctor, blog-memo, blog-interview and blog-learn.
+    assert len(values) == 36
     assert values.pop("blog-chart") is False
-    assert list(values.values()) == [True] * 34
+    assert list(values.values()) == [True] * 35
     # Fork: upstream ships 5 agents; blog-kit adds blog-reviewer-ko.
     assert len(list((ROOT / "agents").glob("*.md"))) == 6
 

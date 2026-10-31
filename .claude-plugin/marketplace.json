@@ -10,7 +10,7 @@
     {
       "name": "claude-blog",
       "source": "./",
-      "description": "AI-powered blog creation, optimization, and management with 35 skill directories (incl. blog-doctor, blog-memo and blog-interview), 6 agents, FLOW framework integration, semantic topic-cluster execution, multilingual publishing, brand and discourse context auto-load, and 5-category scoring. Optimized for Google rankings and AI citations."
+      "description": "AI-powered blog creation, optimization, and management with 36 skill directories (incl. blog-doctor, blog-memo, blog-interview and blog-learn), 6 agents, FLOW framework integration, semantic topic-cluster execution, multilingual publishing, brand and discourse context auto-load, and 5-category scoring. Optimized for Google rankings and AI citations."
     },
     {
       "name": "blog-studio",

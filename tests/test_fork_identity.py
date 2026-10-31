@@ -22,7 +22,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 UPSTREAM_SKILL_DIRS = 32
-FORK_SKILLS = ("blog-doctor", "blog-memo", "blog-interview")
+FORK_SKILLS = ("blog-doctor", "blog-memo", "blog-interview", "blog-learn")
 
 
 def _load(name: str) -> dict:

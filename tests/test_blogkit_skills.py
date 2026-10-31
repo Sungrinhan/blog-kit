@@ -1,6 +1,6 @@
-"""S3 static invariants for the M2c pipeline skills (M2c-12 and 13, extended by 14).
+"""S3 static invariants for the M2c pipeline skills (M2c-12, 13 and 14).
 
-The pipeline skills (/blog-memo, /blog-interview) are standalone commands
+The pipeline skills (/blog-memo, /blog-interview, /blog-learn) are standalone commands
 outside the /blog router, like blog-doctor. These tests read their files as
 text: each skill runs the engine and the context loader from the installed
 plugin path (${CLAUDE_SKILL_DIR}), never tells the AI or a subagent to read
@@ -9,13 +9,19 @@ loader's fences; the stated output paths are the exception), the router names
 the skill among the fork skills it does not route, the memo template holds
 the plan's seven items, the decision-record template keeps the upstream
 template headings and the plan's nine items, and /blog-interview stops at the
-third P0 failure and never calls the upstream delivery contract.
+third P0 failure and never calls the upstream delivery contract. /blog-learn
+asks at least two questions (a concept and a counterargument one), names the
+four verdicts, writes proposals in the engine's format (its examples pass the
+engine's own parse_proposal() and learning_result()), and only shows the
+person the approve and accept-proposal commands, never running them.
 
 Stdlib + pytest only. No network.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -30,20 +36,25 @@ MEMO_TEMPLATE = SKILLS / "blog-memo" / "references" / "memo-template.md"
 INTERVIEW_SKILL = SKILLS / "blog-interview" / "SKILL.md"
 INTERVIEW_REFS = SKILLS / "blog-interview" / "references"
 DECISION_RECORD = INTERVIEW_REFS / "decision-record.md"
+LEARN_SKILL = SKILLS / "blog-learn" / "SKILL.md"
+ENGINE = ROOT / "adapters" / "astro" / "blogkit.py"
+VERIFIER = ROOT / "adapters" / "astro" / "blogkit_verify.py"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from validate_skills import parse_frontmatter, validate_frontmatter  # noqa: E402
 
-PIPELINE_SKILLS = ("blog-memo", "blog-interview")
+PIPELINE_SKILLS = ("blog-memo", "blog-interview", "blog-learn")
 ENGINE_CALL = '"${CLAUDE_SKILL_DIR}/../../adapters/astro/blogkit.py"'
 LOADER_CALL = '"${CLAUDE_SKILL_DIR}/../../scripts/load_blogkit_context.py"'
 PRIVATE_RE = re.compile(r"inbox/|\.blogkit")
 READ_RE = re.compile(r"\bRead\b|\bGrep\b|\bGlob\b|읽|cat |head |서브에이전트|subagent|Agent", re.I)
 FORBIDS = ("금지", "않는다", "않고", "말고", "않는", "않게")
 # Output paths a skill writes: the copied memo template and the prerequisite record; the
-# interview answers, the claims file, the saved review result and the draft folder.
+# interview answers, the claims file, the saved review result and the draft folder; the learning
+# result, the appended interview answer and the new proposal files.
 OUTPUTS = {"blog-memo": ("memo.md", "prereq.md"),
-           "blog-interview": ("interview.md", "claims.json", "review.json", "/draft/")}
+           "blog-interview": ("interview.md", "claims.json", "review.json", "/draft/"),
+           "blog-learn": ("learning.json", "interview.md", ".blogkit/pending")}
 MEMO_ITEMS = ["문제", "제약", "실제 검토한 후보(수 그대로)", "선택", "당시 이유", "결과", "지금 생각"]
 DECISION_ITEMS = ["맥락", "실제 검토 후보", "나중에 찾은 대안(별도 표시)", "기준", "선택과 당시 이유", "장단점",
                   "사후 평가(당시와 분리)", "다른 방향", "내 원칙"]
@@ -196,3 +207,100 @@ def test_interview_skill_never_calls_the_upstream_delivery_contract():
     assert re.search(r"(?<![\w-])review\.md", texts) is None  # the upstream review file
     assert re.search(r"`blog-reviewer`", texts) is None  # only the Korean reviewer
     assert "업스트림 전달 계약" in texts and "부르지 않는다" in texts
+
+
+# ---------------------------------------------------------------- /blog-learn (M2c-14)
+
+
+def _load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fenced(text: str, lang: str) -> list[str]:
+    return re.findall(rf"^```{lang}\n(.*?)\n```$", text, re.S | re.M)
+
+
+def _fill(text: str) -> str:
+    """The example placeholders an actual run replaces, with fake values of the right shape."""
+    return (text.replace("<status 출력의 content_hash>", "0" * 64).replace("<YYYY-MM-DD>", "2026-10-30")
+            .replace("<slug>", "example-post"))
+
+
+def test_learn_skill_runs_the_steps_through_the_engine_and_loader():
+    _, body = _parts(LEARN_SKILL)
+    for bundle in ("review", "proposal"):
+        assert re.search(rf"--bundle {re.escape(bundle)}(?![\w-])", body), bundle
+    for command in ("status", "record-learning"):
+        assert re.search(rf'blogkit\.py" {re.escape(command)} "<slug>"', body), command
+    for code in ("learning_stale", "learning_prerequisite_missing", "review_inputs_changed",
+                 "learning_inputs_changed", "approval_missing"):
+        assert code in body, code
+    assert "학습 결과의 답은 인터뷰 근거로 쓰지 않" in body
+
+
+def test_learn_skill_asks_at_least_two_questions_and_names_the_four_verdicts():
+    _, body = _parts(LEARN_SKILL)
+    assert "최소 2개" in body and "개념" in body and "반론" in body
+    for verdict, wording in (("match", "일치"), ("factual_error", "사실 오류"), ("misconception", "오개념"),
+                             ("stance_changed", "입장 변경 반영")):
+        assert f"`{verdict}`" in body and wording in body, verdict
+    assert "다시 묻" in body  # a misconception is explained and asked again
+    assert "⑤부터" in body  # a factual error or a changed stance goes back to the draft
+    assert "새 답 ID" in body and "옛 답" in body
+
+
+def test_learn_skill_learning_example_passes_the_engine_check():
+    engine = _load("blogkit_learn_engine", ENGINE)
+    verifier = _load("blogkit_learn_verifier", VERIFIER)
+    _, body = _parts(LEARN_SKILL)
+    section = body.split("## 학습 결과 형식", 1)[1].split("\n## ", 1)[0]
+    blocks = _fenced(section, "json")
+    assert len(blocks) == 1
+    data = _fill(blocks[0]).encode("utf-8")
+    doc, passed = engine.learning_result(data, "inbox/example-post/learning.json", verifier)
+    assert passed is True
+    assert {q["kind"] for q in doc["questions"]} == {"concept", "counter"}
+    assert json.loads(data) == doc
+
+
+def test_learn_skill_proposal_examples_pass_the_engine_parser():
+    engine = _load("blogkit_learn_engine", ENGINE)
+    verifier = _load("blogkit_learn_verifier", VERIFIER)
+    _, body = _parts(LEARN_SKILL)
+    section = body.split("## 제안 파일 형식", 1)[1].split("\n## ", 1)[0]
+    kinds = {}
+    for block in _fenced(section, "markdown"):
+        kind, fields = engine.parse_proposal(_fill(block).encode("utf-8") + b"\n", ".blogkit/pending/x.md", verifier)
+        kinds[kind] = fields
+    assert set(kinds) == {"principle", "card"}
+    for kind, fields in kinds.items():
+        assert tuple(fields) == engine.PROPOSAL_FIELDS[kind], kind
+    assert kinds["card"]["source_url"].startswith("https://")
+    assert "^[a-z0-9][a-z0-9-]{0,63}$" in body  # the proposal id grammar
+
+
+def test_learn_skill_shows_but_never_runs_approve_or_accept_proposal():
+    _, body = _parts(LEARN_SKILL)
+    for block in _fenced(body, "bash"):
+        assert " approve " not in block and "accept-proposal" not in block, block
+    shown = "\n".join(_fenced(body, "text"))
+    assert re.search(r'blogkit\.py" approve "<slug>" --blog-repo "<blog repo>" --hash "<content_hash>" '
+                     r'--warnings "<warnings_digest>"', shown)
+    assert re.search(r'blogkit\.py" accept-proposal "<ID>" --blog-repo "<blog repo>" --digest "<digest>"', shown)
+    assert "accept-proposal <ID> --digest <digest>" in body
+    assert "이 스킬은 `approve`와 `accept-proposal`을 실행하지 않는다" in body
+    assert "set -C" in body  # a proposal file is created, never written over
+    assert "sha256" in body
+
+
+def test_learn_skill_never_calls_the_upstream_delivery_contract():
+    _, body = _parts(LEARN_SKILL)
+    for name in UPSTREAM_DELIVERY:
+        assert name not in body, name
+    assert re.search(r"(?<![\w-])review\.md", body) is None
+    assert re.search(r"`blog-reviewer`", body) is None
+    assert "업스트림 전달 계약" in body and "부르지 않는다" in body
