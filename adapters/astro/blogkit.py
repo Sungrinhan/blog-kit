@@ -9,6 +9,7 @@ Commands (each prints one JSON object and exits 1 on failure):
     approve SLUG        record approval for --hash and --warnings
     publish SLUG        flip the draft line and commit the post and evidence
     memo-check SLUG     confidential check of inbox/<slug>/memo.md into the state file
+    record-review SLUG  review record from inbox/<slug>/review.json, bound to its inputs
     sync-verifier       copy the installed verifier to the blog repo
 
 Every command first requires the install identity: this file must not live
@@ -18,7 +19,7 @@ sync-verifier stops there; every other command also requires the blog repo's
 verifier copy to match this install (doctor check i), so a stale copy is
 repaired with sync-verifier and nothing else, and the blog repo to be the root
 of a git work tree. Commands that change the evidence or the public copy
-(convert, check, approve, publish, memo-check) hold an exclusive flock on
+(convert, check, approve, publish, memo-check, record-review) hold an exclusive flock on
 inbox/<slug>/blogkit.lock, which records the process id and host; only a lock
 left by a dead process on this host is cleared, and judging it happens under
 the flock.
@@ -58,7 +59,7 @@ one that rule allows; Markdown references by the convert rules; a file
 reference must be an image
 in the post's asset folder; violations are reported, never fixed), 3
 `npx --no-install astro check` by its exit code, 4 a review record for the
-current hash with no P0 (written by the M2c reviewer), 5 the confidential
+current hash with no P0 (written by record-review, inputs unchanged), 5 the confidential
 check over the post and its asset files (a term blocks; heuristics become
 warning ids), 6 the draft preview build (`npx --no-install astro build
 --outDir .blogkit-preview` with BLOGKIT_INCLUDE_DRAFTS=1, into a folder the
@@ -109,6 +110,26 @@ checker version or the term list voids it. The memo is read again before the
 save and a change records nothing. Output is the memo path, lines,
 categories and digests only.
 
+record-review reads inbox/<slug>/review.json, interview.md and claims.json
+once each (a regular file, no symlink component, at most 256 KB, strict
+UTF-8, JSON with no duplicate key) and checks and digests those bytes. The
+claims file is {"claims": [...]}: at most 500 items with distinct ids, a fact
+(id, kind, location, claim, http(s) url, excerpt, status confirmed or
+unconfirmed) or a stance (id, kind, location, claim, interview_ids). The
+review result is exactly content_hash, findings (at most 500, distinct ids,
+severity P0 to P3, category, location, optional claim_ids and interview_ids)
+and inputs (interview_digest, claims_digest); a total or any other field is
+review_invalid. The engine counts P0. A result for another hash is
+review_stale, other input digests are review_inputs_changed. The same inputs
+and result change nothing; otherwise, after the hash and the three digests
+are read again (a change records nothing), the evidence drops gate 4,
+learning and approval and takes {kind: review, p0, content_hash,
+engine_version}, then the state's review_inputs are saved. check (gate 4),
+status and approve refuse with review_inputs_changed while the current
+interview, claims and review result digests are not the state's
+review_inputs for the current hash (review_inputs_match()), so a stop between
+the two saves is caught until record-review runs again.
+
 Output holds fixed error codes, check ids and reasons, versions,
 repo-relative paths and line numbers only. It never prints post text, external command output
 or URLs.
@@ -156,8 +177,8 @@ PREVIEW_TIMEOUT = 600.0
 MAX_LOCATIONS = 50
 # A path-shaped token followed by :<line> in external command output.
 LOCATION_RE = re.compile(r"(?P<path>[\w./@+-]*[\w@+-]\.[A-Za-z0-9]+):(?P<line>[0-9]+)")
-SLUG_COMMANDS = ("convert", "check", "status", "approve", "publish", "memo-check")
-LOCK_COMMANDS = ("convert", "check", "approve", "publish", "memo-check")
+SLUG_COMMANDS = ("convert", "check", "status", "approve", "publish", "memo-check", "record-review")
+LOCK_COMMANDS = ("convert", "check", "approve", "publish", "memo-check", "record-review")
 LOCK_NAME = "blogkit.lock"
 MAX_LOCK_BYTES = 4096
 
@@ -224,6 +245,21 @@ STATE_SECTIONS = {
                      "reason": "code"},
 }
 CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# record-review: the interview answers, the claims file and the review result.
+MAX_INPUT_BYTES = 256 * 1024
+MAX_CLAIMS = 500
+MAX_FINDINGS = 500
+ITEM_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+INTERVIEW_ID_RE = re.compile(r"I-[0-9]{1,6}")
+WEB_URL_RE = re.compile(r"https?://[^\s]+")
+CLAIM_FIELDS = {"fact": frozenset({"id", "kind", "location", "claim", "url", "excerpt", "status"}),
+                "stance": frozenset({"id", "kind", "location", "claim", "interview_ids"})}
+CLAIM_STATUSES = frozenset({"confirmed", "unconfirmed"})
+REVIEW_KEYS = frozenset({"content_hash", "findings", "inputs"})
+REVIEW_INPUT_KEYS = frozenset({"interview_digest", "claims_digest"})
+FINDING_KEYS = frozenset({"id", "severity", "category", "location"})
+FINDING_OPTIONAL_KEYS = frozenset({"claim_ids", "interview_ids"})
+SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
 JOURNAL_TARGET_KEYS = frozenset({"path", "existed", "original_digest", "new_digest", "staged", "backup"})
 
 
@@ -1446,11 +1482,17 @@ def gate_3(blog: Path) -> dict:
     return _gate(3, errors)
 
 
-def gate_4(evidence: dict, current: str) -> dict:
-    """A review record for the current hash with no P0 finding (written by the M2c reviewer)."""
+def gate_4(evidence: dict, current: str, inputs_match: bool) -> dict:
+    """A review record for the current hash with no P0 finding, written by record-review.
+
+    The interview answers, claims file and review result must still be the
+    ones record-review bound to that hash (review_inputs_match).
+    """
     reviews = [r for r in evidence["records"] if r["kind"] == "review" and r["content_hash"] == current]
     if not reviews:
         return _gate(4, [_error("review_missing")])
+    if not inputs_match:
+        return _gate(4, [_error("review_inputs_changed")])
     return _gate(4, [] if reviews[0]["p0"] == 0 else [_error("review_has_p0")])
 
 
@@ -1613,7 +1655,8 @@ def check(blog: Path, slug: str, verifier, render, doctor) -> dict:
     if evidence["content_hash"] != current:
         evidence.update(content_hash=current, engine_version=version, records=[])
     gates = [gate_1(blog, doctor), gate_2(blog, slug, verifier, render, post, assets), gate_3(blog),
-             gate_4(evidence, current), gate_5(blog, slug), gate_6(blog, slug, verifier, render, post)]
+             gate_4(evidence, current, review_inputs_match(blog, verifier, slug, current)), gate_5(blog, slug),
+             gate_6(blog, slug, verifier, render, post)]
     if _current_hash(blog, verifier, slug) != current:
         raise CliError("content_changed_during_check", post_path)
     numbers = {gate["gate"] for gate in gates}
@@ -1641,7 +1684,7 @@ def status(blog: Path, slug: str, verifier) -> dict:
     warnings = sorted({w for gate in gates.values() for w in gate["warnings"]})
     return {"content_hash": current, "evidence_hash": evidence["content_hash"], "gates": gates,
             "warnings": warnings, "warnings_digest": verifier.warnings_digest(warnings),
-            "missing": verifier.evidence_gaps(evidence, current)}
+            "missing": evidence_gaps(blog, verifier, slug, evidence, current)}
 
 
 def _gate_warnings(evidence: dict) -> list[str]:
@@ -1658,8 +1701,10 @@ def approve(blog: Path, slug: str, verifier, content_hash: str, warnings: str) -
     current = _current_hash(blog, verifier, slug)
     if content_hash != current:
         raise CliError("hash_mismatch")
-    gaps = [gap for gap in verifier.evidence_gaps(evidence, current)
+    gaps = [gap for gap in evidence_gaps(blog, verifier, slug, evidence, current)
             if gap not in ("approval_missing", "approval_warnings_mismatch")]
+    if "review_inputs_changed" in gaps:
+        raise CliError("review_inputs_changed", missing=gaps)
     if gaps:
         raise CliError("evidence_incomplete", missing=gaps)
     digest = verifier.warnings_digest(_gate_warnings(evidence))
@@ -2155,6 +2200,190 @@ def memo_check(blog: Path, slug: str, verifier, confirm: str | None) -> dict:
     return report
 
 
+# ---------------------------------------------------------------- record-review and the review inputs
+
+
+def _input_bytes(blog: Path, verifier, relative: str, missing: str) -> bytes:
+    """An inbox input file: a regular file, no symlink component, at most MAX_INPUT_BYTES."""
+    refuse_symlinks(blog, relative)
+    if not os.path.lexists(blog / relative):
+        raise CliError(missing, relative)
+    return _read(verifier, blog, relative, MAX_INPUT_BYTES)
+
+
+def _strict_json(data: bytes, code: str, relative: str):
+    """JSON from strict UTF-8 bytes; a duplicate key, a BOM or nesting too deep to parse is code."""
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicates)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise CliError(code, relative) from None
+
+
+def _text(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _ids(value, pattern: re.Pattern, allow_empty: bool = True) -> bool:
+    """A list of distinct ids in pattern."""
+    return (isinstance(value, list) and (allow_empty or bool(value))
+            and all(isinstance(item, str) and pattern.fullmatch(item) for item in value)
+            and len(set(value)) == len(value))
+
+
+def _claim_ok(item) -> bool:
+    if (not isinstance(item, dict) or not isinstance(item.get("kind"), str) or item["kind"] not in CLAIM_FIELDS
+            or set(item) != CLAIM_FIELDS[item["kind"]]):
+        return False
+    if not (isinstance(item["id"], str) and ITEM_ID_RE.fullmatch(item["id"])
+            and _text(item["location"]) and _text(item["claim"])):
+        return False
+    if item["kind"] == "fact":
+        return (isinstance(item["url"], str) and WEB_URL_RE.fullmatch(item["url"]) is not None
+                and _text(item["excerpt"]) and isinstance(item["status"], str) and item["status"] in CLAIM_STATUSES)
+    return _ids(item["interview_ids"], INTERVIEW_ID_RE, allow_empty=False)
+
+
+def validate_claims(data: bytes, relative: str) -> None:
+    """Raise claims_invalid unless data is {"claims": [...]} of at most MAX_CLAIMS fact and stance items.
+
+    Every item has id, kind and location (the public copy's section and the
+    quoted sentence) and claim; a fact adds url, excerpt and status
+    (confirmed or unconfirmed), a stance adds interview_ids. Ids are distinct;
+    an unknown or missing field or a wrong type is refused.
+    """
+    doc = _strict_json(data, "claims_invalid", relative)
+    if not isinstance(doc, dict) or set(doc) != {"claims"} or not isinstance(doc["claims"], list):
+        raise CliError("claims_invalid", relative)
+    items = doc["claims"]
+    if len(items) > MAX_CLAIMS or not all(_claim_ok(item) for item in items):
+        raise CliError("claims_invalid", relative)
+    if len({item["id"] for item in items}) != len(items):
+        raise CliError("claims_invalid", relative)
+
+
+def _finding_ok(finding) -> bool:
+    if not isinstance(finding, dict) or not FINDING_KEYS <= set(finding) <= FINDING_KEYS | FINDING_OPTIONAL_KEYS:
+        return False
+    return (isinstance(finding["id"], str) and ITEM_ID_RE.fullmatch(finding["id"]) is not None
+            and isinstance(finding["severity"], str) and finding["severity"] in SEVERITIES
+            and _text(finding["category"]) and _text(finding["location"])
+            and _ids(finding.get("claim_ids", []), ITEM_ID_RE)
+            and _ids(finding.get("interview_ids", []), INTERVIEW_ID_RE))
+
+
+def review_result(data: bytes, relative: str, verifier) -> tuple[dict, int]:
+    """The review result and its P0 count, counted here from the findings.
+
+    The result is exactly content_hash, findings (at most MAX_FINDINGS, each
+    id, severity P0 to P3, category, location and optional claim_ids and
+    interview_ids, ids distinct) and inputs (interview_digest, claims_digest).
+    Any other field, a total among them, is review_invalid.
+    """
+    doc = _strict_json(data, "review_invalid", relative)
+    if not isinstance(doc, dict) or set(doc) != REVIEW_KEYS or not verifier._hex64(doc["content_hash"]):
+        raise CliError("review_invalid", relative)
+    inputs, findings = doc["inputs"], doc["findings"]
+    if not (isinstance(inputs, dict) and set(inputs) == REVIEW_INPUT_KEYS
+            and all(verifier._hex64(value) for value in inputs.values())):
+        raise CliError("review_invalid", relative)
+    if not isinstance(findings, list) or len(findings) > MAX_FINDINGS or not all(map(_finding_ok, findings)):
+        raise CliError("review_invalid", relative)
+    if len({finding["id"] for finding in findings}) != len(findings):
+        raise CliError("review_invalid", relative)
+    return doc, sum(1 for finding in findings if finding["severity"] == "P0")
+
+
+def _review_paths(verifier, slug: str) -> dict[str, str]:
+    return {key: verifier.inbox_file(slug, kind) for key, kind in
+            (("review_digest", "review"), ("interview_digest", "interview"), ("claims_digest", "claims"))}
+
+
+def review_inputs_match(blog: Path, verifier, slug: str, current: str) -> bool:
+    """Whether the state's review_inputs are the current hash and the current input files' digests.
+
+    The one rule check (gate 4), status, approve and record-learning use: the
+    interview answers, the claims file and the review result must be the bytes
+    record-review recorded for this content hash. A missing or unreadable file
+    never matches.
+    """
+    record = read_state(blog, verifier, slug)["review_inputs"]
+    if not isinstance(record, dict) or record.get("content_hash") != current:
+        return False
+    for key, relative in _review_paths(verifier, slug).items():
+        try:
+            digest = _sha256(_input_bytes(blog, verifier, relative, "missing_file"))
+        except CliError:
+            return False
+        if record.get(key) != digest:
+            return False
+    return True
+
+
+def evidence_gaps(blog: Path, verifier, slug: str, evidence: dict, current: str) -> list[str]:
+    """The verifier's evidence gaps, plus review_inputs_changed for a review record whose inputs moved on."""
+    gaps = verifier.evidence_gaps(evidence, current)
+    if "content_hash_mismatch" in gaps or "review_missing" in gaps or review_inputs_match(blog, verifier, slug, current):
+        return gaps
+    at = next((i for i, gap in enumerate(gaps) if not gap.startswith("gate_") and gap != "record_hash_mismatch"),
+              len(gaps))
+    return gaps[:at] + ["review_inputs_changed"] + gaps[at:]
+
+
+def record_review(blog: Path, slug: str, verifier) -> dict:
+    """Check the review result and record it for the current hash.
+
+    The review result, interview answers and claims file are each read once
+    and checked from those bytes. The result must name the current content
+    hash (review_stale) and the current interview and claims digests
+    (review_inputs_changed). The engine counts P0 itself. The same inputs and
+    result as recorded change nothing. Otherwise, after the hash and the
+    three digests are read again (a change records nothing), the evidence
+    drops gate 4, learning and approval and takes the new review record, and
+    then the state's review_inputs are saved. A stop between the two saves
+    leaves review_inputs behind, which check, status and approve refuse until
+    record-review runs again.
+    """
+    paths = _review_paths(verifier, slug)
+    review_data = _input_bytes(blog, verifier, paths["review_digest"], "review_file_missing")
+    review, p0 = review_result(review_data, paths["review_digest"], verifier)
+    interview_data = _input_bytes(blog, verifier, paths["interview_digest"], "interview_missing")
+    try:
+        interview_data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CliError("interview_invalid", paths["interview_digest"]) from None
+    claims_data = _input_bytes(blog, verifier, paths["claims_digest"], "claims_missing")
+    validate_claims(claims_data, paths["claims_digest"])
+    evidence = _load_evidence(blog, verifier, slug)
+    current = _current_hash(blog, verifier, slug)
+    if review["content_hash"] != current:
+        raise CliError("review_stale", paths["review_digest"])
+    if review["inputs"] != {"interview_digest": _sha256(interview_data), "claims_digest": _sha256(claims_data)}:
+        raise CliError("review_inputs_changed", paths["review_digest"])
+    inputs = {"content_hash": current, "review_digest": _sha256(review_data), **review["inputs"]}
+    version = engine_version()
+    record = {"kind": "review", "p0": p0, "content_hash": current, "engine_version": version}
+    result = {"content_hash": current, "p0": p0}
+    if (evidence["content_hash"] == current and record in evidence["records"]
+            and read_state(blog, verifier, slug)["review_inputs"] == inputs):
+        return {**result, "changed": False}
+    if evidence["content_hash"] != current:
+        evidence.update(content_hash=current, engine_version=version, records=[])
+    evidence["records"] = [r for r in evidence["records"] if r["kind"] not in ("review", "learning", "approval")
+                           and not (r["kind"] == "gate" and r["gate"] == 4)] + [record]
+    if _current_hash(blog, verifier, slug) != current:
+        raise CliError("content_changed_during_check", verifier.post_path_for(slug))
+    for key, relative in paths.items():
+        try:
+            same = _sha256(_input_bytes(blog, verifier, relative, "missing_file")) == inputs[key]
+        except CliError:
+            same = False
+        if not same:
+            raise CliError("input_changed_during_record", relative)
+    _save_evidence(blog, verifier, slug, evidence)
+    update_state(blog, verifier, slug, "review_inputs", inputs)
+    return {**result, "changed": True}
+
+
 def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
     inbox = verifier.inbox_folder(args.slug)
     if args.command == "convert":
@@ -2173,6 +2402,8 @@ def dispatch(args: argparse.Namespace, blog: Path, verifier) -> dict:
         return publish(blog, args.slug, verifier)
     if args.command == "memo-check":
         return memo_check(blog, args.slug, verifier, args.confirm)
+    if args.command == "record-review":
+        return record_review(blog, args.slug, verifier)
     raise CliError("not_implemented")
 
 

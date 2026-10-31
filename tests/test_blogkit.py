@@ -1384,8 +1384,8 @@ def test_recovery_that_cannot_be_judged_changes_nothing(engine: Engine, count: i
 
 @pytest.mark.parametrize("command", [
     ["check", SLUG], ["status", SLUG], ["publish", SLUG],
-    ["approve", SLUG, "--hash", "0" * 64, "--warnings", "0" * 64],
-], ids=["check", "status", "publish", "approve"])
+    ["approve", SLUG, "--hash", "0" * 64, "--warnings", "0" * 64], ["record-review", SLUG],
+], ids=["check", "status", "publish", "approve", "record-review"])
 def test_other_commands_refuse_an_interrupted_slug(engine: Engine, command: list[str]) -> None:
     _stopped_reconvert(engine, 5)
     before = _tree(engine)
@@ -1421,18 +1421,54 @@ def _write_evidence(engine: Engine, evidence: dict) -> None:
     (engine.blog / EVIDENCE).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
 
-def _review(engine: Engine, p0: int = 0) -> None:
-    """The M2c reviewer's record for the current hash, written by the test in its place.
+INTERVIEW = f"inbox/{SLUG}/interview.md"
+CLAIMS = f"inbox/{SLUG}/claims.json"
+REVIEW = f"inbox/{SLUG}/review.json"
+INTERVIEW_TEXT = "# 가짜 인터뷰\n\nI-1\n가짜 질문에 대한 가짜 답입니다.\n"
+FACT = {"id": "C-1", "kind": "fact", "location": "## 가짜 절: 가짜 문장", "claim": "가짜 사실 문장",
+        "url": "https://docs.invalid/fake", "excerpt": "가짜 발췌", "status": "confirmed"}
+STANCE = {"id": "S-1", "kind": "stance", "location": "## 가짜 절: 가짜 입장", "claim": "가짜 입장 문장",
+          "interview_ids": ["I-1"]}
 
-    Like every record writer, it starts the records afresh when the hash moved on.
-    """
-    evidence = _evidence(engine)
-    current = _verifier().content_hash(engine.blog, SLUG)
-    if evidence["content_hash"] != current:
-        evidence.update(content_hash=current, engine_version=VERSION, records=[])
-    evidence["records"] = [r for r in evidence["records"] if r["kind"] != "review"] + [
-        {"kind": "review", "p0": p0, "content_hash": current, "engine_version": VERSION}]
-    _write_evidence(engine, evidence)
+
+def _finding(number: int, severity: str = "P2", **extra) -> dict:
+    return {"id": f"F-{number}", "severity": severity, "category": "fake_category",
+            "location": "## 가짜 절: 가짜 문장", **extra}
+
+
+def _inputs(engine: Engine, interview: str | bytes = INTERVIEW_TEXT, claims=None) -> None:
+    """Write the interview answers and the claims file; claims is a document or raw bytes."""
+    folder = engine.blog / "inbox" / SLUG
+    folder.mkdir(parents=True, exist_ok=True)
+    (engine.blog / INTERVIEW).write_bytes(interview if isinstance(interview, bytes) else interview.encode("utf-8"))
+    claims = {"claims": [FACT, STANCE]} if claims is None else claims
+    (engine.blog / CLAIMS).write_bytes(
+        claims if isinstance(claims, bytes) else json.dumps(claims, ensure_ascii=False).encode("utf-8"))
+
+
+def _file_sha(engine: Engine, relative: str) -> str:
+    return _sha((engine.blog / relative).read_bytes())
+
+
+def _review_doc(engine: Engine, findings=(), **override) -> dict:
+    """A review result for the current hash and the interview and claims files on disk."""
+    doc = {"content_hash": _verifier().content_hash(engine.blog, SLUG), "findings": list(findings),
+           "inputs": {"interview_digest": _file_sha(engine, INTERVIEW), "claims_digest": _file_sha(engine, CLAIMS)}}
+    doc.update(override)
+    return doc
+
+
+def _write_review(engine: Engine, doc) -> None:
+    data = doc if isinstance(doc, bytes) else (doc if isinstance(doc, str) else json.dumps(doc, ensure_ascii=False))
+    (engine.blog / REVIEW).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+
+def _review(engine: Engine, p0: int = 0) -> None:
+    """The review step through the engine: inputs, a review result with p0 P0 findings, record-review."""
+    _inputs(engine)
+    _write_review(engine, _review_doc(engine, [_finding(n, "P0") for n in range(1, p0 + 1)] + [_finding(99, "P3")]))
+    rc, _, output = engine.run("record-review", SLUG)
+    assert rc == 0, output
 
 
 def _gates(payload: dict) -> dict[int, dict]:
@@ -2259,7 +2295,7 @@ def test_a_failed_commit_is_finished_by_running_publish_again(engine: Engine) ->
 
 
 ALL_COMMANDS = [["convert", SLUG], ["check", SLUG], ["status", SLUG], ["approve", SLUG, "--hash", "0" * 64,
-                "--warnings", "0" * 64], ["publish", SLUG], ["sync-verifier"]]
+                "--warnings", "0" * 64], ["publish", SLUG], ["record-review", SLUG], ["sync-verifier"]]
 
 
 def test_no_command_prints_planted_secrets_on_the_normal_or_failing_path(engine: Engine) -> None:
@@ -2698,3 +2734,376 @@ def test_a_memo_changed_before_the_save_records_nothing(engine: Engine) -> None:
     rc, payload, output = engine.run("memo-check", SLUG, script=wrapper)
     assert rc == 1 and _codes(payload) == ["memo_changed_during_check"], output
     assert not (engine.blog / STATE).exists()
+
+
+# ------------------------------------------------------------------ record-review and the review inputs
+
+
+def _reviewable(engine: Engine, findings=()) -> dict:
+    """Converted with interview answers, claims and a review result for the current hash; returns the result."""
+    _checkable(engine)
+    _inputs(engine)
+    doc = _review_doc(engine, findings)
+    _write_review(engine, doc)
+    return doc
+
+
+def _review_records(engine: Engine) -> list[dict]:
+    return [r for r in _evidence(engine)["records"] if r["kind"] == "review"]
+
+
+def _snapshot(engine: Engine) -> tuple[bytes, bytes | None]:
+    state = engine.blog / STATE
+    return (engine.blog / EVIDENCE).read_bytes(), state.read_bytes() if state.exists() else None
+
+
+def test_record_review_counts_p0_itself_and_binds_the_inputs(engine: Engine) -> None:
+    doc = _reviewable(engine, [_finding(1, "P0", claim_ids=["C-1"]), _finding(2, "P1", interview_ids=["I-1"]),
+                               _finding(3, "P0"), _finding(4, "P3")])
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+    current = doc["content_hash"]
+    assert (payload["content_hash"], payload["p0"], payload["changed"]) == (current, 2, True)
+    assert _review_records(engine) == [{"kind": "review", "p0": 2, "content_hash": current, "engine_version": VERSION}]
+    _verifier().validate_evidence(_evidence(engine))
+    assert _state_block(engine) == {**EMPTY_STATE, "review_inputs": {
+        "content_hash": current, "review_digest": _file_sha(engine, REVIEW),
+        "interview_digest": _file_sha(engine, INTERVIEW), "claims_digest": _file_sha(engine, CLAIMS)}}
+    assert not (engine.blog / LOCK).exists()
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 4) == ["review_has_p0"], output
+
+
+def test_record_review_without_a_review_file_is_review_file_missing(engine: Engine) -> None:
+    _checkable(engine)
+    _inputs(engine)
+    before = _snapshot(engine)
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert rc == 1 and payload["errors"] == [{"code": "review_file_missing", "path": REVIEW}], output
+    assert _snapshot(engine) == before
+
+
+def _doc_change(**override):
+    def change(e: Engine) -> None:
+        _write_review(e, {**_review_doc(e, [_finding(1)]), **override})
+    return change
+
+
+def _raw_review(data: str | bytes):
+    return lambda e: _write_review(e, data)
+
+
+def _bad_finding(**fields):
+    finding = {k: v for k, v in {**_finding(1), **fields}.items() if v is not ...}
+    return _doc_change(findings=[finding])
+
+
+def _claims_change(claims):
+    """Broken claims, with a review result that names their actual digest."""
+    def change(e: Engine) -> None:
+        _inputs(e, claims=claims)
+        _write_review(e, _review_doc(e))
+    return change
+
+
+def _interview_change(data: bytes):
+    def change(e: Engine) -> None:
+        _inputs(e, interview=data)
+        _write_review(e, _review_doc(e))
+    return change
+
+
+def _bad_fact(**fields):
+    return _claims_change({"claims": [{k: v for k, v in {**FACT, **fields}.items() if v is not ...}]})
+
+
+def _bad_stance(**fields):
+    return _claims_change({"claims": [{k: v for k, v in {**STANCE, **fields}.items() if v is not ...}]})
+
+
+def _remove(relative: str):
+    return lambda e: (e.blog / relative).unlink()
+
+
+def _symlink(relative: str):
+    def change(e: Engine) -> None:
+        outside = e.tmp / "outside-input"
+        outside.write_bytes((e.blog / relative).read_bytes())
+        (e.blog / relative).unlink()
+        (e.blog / relative).symlink_to(outside)
+    return change
+
+
+REVIEW_REFUSALS = {
+    "not-json": (_raw_review("{not json"), "review_invalid", REVIEW),
+    "not-utf8": (_raw_review(b'{"content_hash": "\xff"}'), "review_invalid", REVIEW),
+    "duplicate-key": (_raw_review('{"findings": [], "findings": []}'), "review_invalid", REVIEW),
+    "list": (_raw_review("[]"), "review_invalid", REVIEW),
+    "missing-inputs": (lambda e: _write_review(e, {k: v for k, v in _review_doc(e).items() if k != "inputs"}),
+                       "review_invalid", REVIEW),
+    "total-field": (_doc_change(p0=0), "review_invalid", REVIEW),
+    "finding-total-field": (_bad_finding(p0=1), "review_invalid", REVIEW),
+    "inputs-extra-field": (lambda e: _write_review(e, _review_doc(
+        e, inputs={**_review_doc(e)["inputs"], "review_digest": "a" * 64})), "review_invalid", REVIEW),
+    "hash-not-hex": (_doc_change(content_hash="A" * 64), "review_invalid", REVIEW),
+    "findings-not-list": (_doc_change(findings={}), "review_invalid", REVIEW),
+    "bad-severity": (_bad_finding(severity="P4"), "review_invalid", REVIEW),
+    "severity-lowercase": (_bad_finding(severity="p0"), "review_invalid", REVIEW),
+    "missing-location": (_bad_finding(location=...), "review_invalid", REVIEW),
+    "empty-category": (_bad_finding(category=""), "review_invalid", REVIEW),
+    "id-not-string": (_bad_finding(id=1), "review_invalid", REVIEW),
+    "claim-ids-not-list": (_bad_finding(claim_ids="C-1"), "review_invalid", REVIEW),
+    "interview-id-shape": (_bad_finding(interview_ids=["Q-1"]), "review_invalid", REVIEW),
+    "duplicate-finding-id": (_doc_change(findings=[_finding(1, "P0"), _finding(1, "P3")]), "review_invalid", REVIEW),
+    "too-many-findings": (_doc_change(findings=[_finding(n) for n in range(501)]), "review_invalid", REVIEW),
+    "too-large": (_raw_review("a" * (256 * 1024 + 1)), "file_too_large", REVIEW),
+    "symlink": (_symlink(REVIEW), "symlink_refused", REVIEW),
+    "folder": (lambda e: ((e.blog / REVIEW).unlink(), (e.blog / REVIEW).mkdir()), "not_a_regular_file", REVIEW),
+    "stale": (_doc_change(content_hash="f" * 64), "review_stale", REVIEW),
+    "interview-digest": (lambda e: _write_review(e, _review_doc(
+        e, inputs={**_review_doc(e)["inputs"], "interview_digest": "f" * 64})), "review_inputs_changed", REVIEW),
+    "claims-digest": (lambda e: _write_review(e, _review_doc(
+        e, inputs={**_review_doc(e)["inputs"], "claims_digest": "f" * 64})), "review_inputs_changed", REVIEW),
+    "interview-missing": (_remove(INTERVIEW), "interview_missing", INTERVIEW),
+    "interview-not-utf8": (_interview_change(b"I-1\n\xff\n"), "interview_invalid", INTERVIEW),
+    "interview-too-large": (_interview_change(b"a" * (256 * 1024 + 1)), "file_too_large", INTERVIEW),
+    "interview-symlink": (_symlink(INTERVIEW), "symlink_refused", INTERVIEW),
+    "claims-missing": (_remove(CLAIMS), "claims_missing", CLAIMS),
+    "claims-symlink": (_symlink(CLAIMS), "symlink_refused", CLAIMS),
+    "claims-too-large": (_claims_change(b" " * (256 * 1024 + 1)), "file_too_large", CLAIMS),
+    "claims-not-json": (_claims_change(b"{"), "claims_invalid", CLAIMS),
+    "claims-not-utf8": (_claims_change(b'{"claims": ["\xff"]}'), "claims_invalid", CLAIMS),
+    "claims-list": (_claims_change([FACT]), "claims_invalid", CLAIMS),
+    "claims-top-extra": (_claims_change({"claims": [], "count": 0}), "claims_invalid", CLAIMS),
+    "claims-duplicate-key": (_claims_change(b'{"claims": [], "claims": []}'), "claims_invalid", CLAIMS),
+    "claims-duplicate-id": (_claims_change({"claims": [FACT, {**STANCE, "id": "C-1"}]}), "claims_invalid", CLAIMS),
+    "claims-too-many": (_claims_change({"claims": [{**FACT, "id": f"C-{n}"} for n in range(501)]}),
+                        "claims_invalid", CLAIMS),
+    "claims-unknown-kind": (_bad_fact(kind="opinion"), "claims_invalid", CLAIMS),
+    "fact-unknown-field": (_bad_fact(interview_ids=["I-1"]), "claims_invalid", CLAIMS),
+    "fact-missing-excerpt": (_bad_fact(excerpt=...), "claims_invalid", CLAIMS),
+    "fact-bad-status": (_bad_fact(status="maybe"), "claims_invalid", CLAIMS),
+    "fact-url-not-web": (_bad_fact(url="file:///etc/passwd"), "claims_invalid", CLAIMS),
+    "fact-empty-claim": (_bad_fact(claim=""), "claims_invalid", CLAIMS),
+    "fact-no-location": (_bad_fact(location=...), "claims_invalid", CLAIMS),
+    "stance-missing-ids": (_bad_stance(interview_ids=...), "claims_invalid", CLAIMS),
+    "stance-empty-ids": (_bad_stance(interview_ids=[]), "claims_invalid", CLAIMS),
+    "stance-bad-id": (_bad_stance(interview_ids=["I-x"]), "claims_invalid", CLAIMS),
+    "stance-url-field": (_bad_stance(url="https://docs.invalid/x"), "claims_invalid", CLAIMS),
+    "item-not-object": (_claims_change({"claims": ["C-1"]}), "claims_invalid", CLAIMS),
+}
+
+
+@pytest.mark.parametrize("change,code,path", REVIEW_REFUSALS.values(), ids=REVIEW_REFUSALS.keys())
+def test_record_review_refusals_leave_evidence_and_state_alone(engine: Engine, change, code: str, path: str) -> None:
+    _reviewable(engine)
+    rc, _, output = engine.run("record-review", SLUG)
+    assert rc == 0, output
+    change(engine)
+    before = _snapshot(engine)
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert rc == 1 and payload["errors"] == [{"code": code, "path": path}], output
+    assert _snapshot(engine) == before
+    _no_leak(output)
+
+
+def test_an_empty_claims_list_and_optional_ids_are_accepted(engine: Engine) -> None:
+    _checkable(engine)
+    _inputs(engine, claims={"claims": []})
+    _write_review(engine, _review_doc(engine, [_finding(1, "P1", claim_ids=[], interview_ids=[])]))
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert (rc, payload["p0"]) == (0, 0), output
+
+
+@pytest.mark.parametrize("relative,text", [
+    (REVIEW, "[" * 200000 + "]" * 50000),
+    (REVIEW, '{"content_hash": "' + "a" * (256 * 1024 - 40)),
+    (CLAIMS, '{"claims": ' + "[" * 120000 + "]" * 120000 + "}"),
+    (CLAIMS, '{"claims": [{"id": "' + "\\u0041" * 40000 + '"}]}'),
+], ids=["review-deep", "review-unclosed-long-line", "claims-deep", "claims-long-escapes"])
+def test_the_review_and_claims_parsers_stay_fast_on_worst_case_input(engine: Engine, relative: str, text: str) -> None:
+    _reviewable(engine)
+    (engine.blog / relative).write_text(text, encoding="utf-8")
+    if relative == CLAIMS:
+        _write_review(engine, _review_doc(engine))
+    engine.timeout = 20
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert rc == 1 and _codes(payload) == ["review_invalid" if relative == REVIEW else "claims_invalid"], output
+
+
+def test_the_same_inputs_again_change_nothing_and_keep_learning_and_approval(engine: Engine) -> None:
+    _approved(engine)
+    before = _snapshot(engine)
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert (rc, payload["changed"], payload["p0"]) == (0, False, 0), output
+    assert _snapshot(engine) == before
+    rc, status, output = engine.run("status", SLUG)
+    assert status["missing"] == [], output
+
+
+def test_another_review_result_drops_gate_4_learning_and_approval(engine: Engine) -> None:
+    status = _approved(engine)
+    gates_before = {r["gate"]: r for r in _evidence(engine)["records"] if r["kind"] == "gate"}
+    _write_review(engine, _review_doc(engine, [_finding(1, "P2"), _finding(2, "P3")]))
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert (rc, payload["changed"], payload["p0"]) == (0, True, 0), output
+    records = _evidence(engine)["records"]
+    assert not [r for r in records if r["kind"] in ("learning", "approval")]
+    assert {r["gate"]: r for r in records if r["kind"] == "gate"} == {
+        n: r for n, r in gates_before.items() if n != 4}
+    assert _review_records(engine) == [{"kind": "review", "p0": 0, "content_hash": status["content_hash"],
+                                        "engine_version": VERSION}]
+    assert _state_block(engine)["review_inputs"]["review_digest"] == _file_sha(engine, REVIEW)
+    rc, status, output = engine.run("status", SLUG)
+    assert status["missing"] == ["gate_4_missing", "learning_missing", "approval_missing"], output
+
+
+def test_a_review_record_written_without_record_review_does_not_count(engine: Engine) -> None:
+    _reviewable(engine)
+    evidence = _evidence(engine)
+    evidence["records"].append({"kind": "review", "p0": 0, "content_hash": evidence["content_hash"],
+                                "engine_version": VERSION})
+    _write_evidence(engine, evidence)
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 4) == ["review_inputs_changed"], output
+    rc, status, output = engine.run("status", SLUG)
+    assert "review_inputs_changed" in status["missing"], output
+
+
+def _append_file(relative: str, text: str):
+    def change(e: Engine) -> None:
+        with open(e.blog / relative, "a", encoding="utf-8") as handle:
+            handle.write(text)
+    return change
+
+
+INPUT_CHANGES = {
+    "interview": _append_file(INTERVIEW, "I-2\n나중에 더한 가짜 답\n"),
+    "claims": lambda e: _inputs(e, claims={"claims": [FACT]}),
+    "review": lambda e: _write_review(e, _review_doc(e, [_finding(7, "P3")])),
+    "interview-removed": _remove(INTERVIEW),
+    "claims-removed": _remove(CLAIMS),
+    "review-removed": _remove(REVIEW),
+}
+
+
+@pytest.mark.parametrize("change", INPUT_CHANGES.values(), ids=INPUT_CHANGES.keys())
+def test_an_input_changed_after_the_review_blocks_check_status_and_approve(engine: Engine, change) -> None:
+    status = _checked(engine)
+    change(engine)
+    before = _evidence(engine)
+    rc, payload, output = _approve(engine, status["content_hash"], status["warnings_digest"])
+    assert rc == 1 and _codes(payload) == ["review_inputs_changed"], output
+    assert _evidence(engine) == before
+    rc, now, output = engine.run("status", SLUG)
+    assert rc == 0 and now["missing"] == ["review_inputs_changed", "approval_missing"], output
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 4) == ["review_inputs_changed"], output
+
+
+REREAD_EDIT = '''\
+import os, runpy, sys
+
+cli, suffix, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
+real_open = os.open
+opened = 0
+
+
+def edit_on_reread(path, *args, **kwargs):
+    global opened
+    if str(path).endswith(suffix):
+        opened += 1
+        if opened == count:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write("\\n")
+    return real_open(path, *args, **kwargs)
+
+
+os.open = edit_on_reread
+sys.argv = [cli, *sys.argv[4:]]
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
+def _reread_edit(engine: Engine, suffix: str, count: int) -> Path:
+    script = engine.tmp / "reread-edit.py"
+    script.write_text(REREAD_EDIT)
+    wrapper = engine.tmp / "run-reread-edit.py"
+    wrapper.write_text(
+        "import runpy, sys\n"
+        f"sys.argv = [{str(script)!r}, {str(engine.cli)!r}, {suffix!r}, '{count}', *sys.argv[1:]]\n"
+        f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    return wrapper
+
+
+@pytest.mark.parametrize("suffix,code,path", [
+    ("/review.json", "input_changed_during_record", REVIEW),
+    ("/interview.md", "input_changed_during_record", INTERVIEW),
+    ("/claims.json", "input_changed_during_record", CLAIMS),
+    (f"/{SLUG}.md", "content_changed_during_check", POST),
+], ids=["review", "interview", "claims", "post"])
+def test_an_input_changed_just_before_the_save_records_nothing(engine: Engine, suffix: str, code: str,
+                                                                path: str) -> None:
+    _reviewable(engine)
+    before = _snapshot(engine)
+    # The draft and the public copy share the post's file name; only the public copy is read here.
+    rc, payload, output = engine.run("record-review", SLUG, script=_reread_edit(engine, suffix, 2))
+    assert rc == 1 and payload["errors"] == [{"code": code, "path": path}], output
+    assert _snapshot(engine) == before
+
+
+def test_a_stop_between_the_evidence_and_the_state_is_caught_and_repaired(engine: Engine) -> None:
+    _reviewable(engine)
+    rc, _, output = engine.run("record-review", SLUG, script=_crash(engine, "after-replace", 1))
+    assert rc == 9, output
+    assert len(_review_records(engine)) == 1 and not (engine.blog / STATE).exists()
+    rc, payload, output = engine.run("check", SLUG)
+    assert rc == 1 and _gate_codes(payload, 4) == ["review_inputs_changed"], output
+    rc, status, output = engine.run("status", SLUG)
+    assert "review_inputs_changed" in status["missing"], output
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert (rc, payload["changed"]) == (0, True), output
+    rc, payload, output = engine.run("check", SLUG)
+    assert (rc, payload["errors"]) == (0, []), output
+
+
+def test_record_review_starts_the_records_afresh_for_a_new_hash(engine: Engine) -> None:
+    _checked(engine)
+    kept = _evidence(engine)["public_copy"]
+    _append_post(engine, "\nOne more line.\n")
+    _write_review(engine, _review_doc(engine))
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert rc == 0, output
+    evidence = _evidence(engine)
+    current = _verifier().content_hash(engine.blog, SLUG)
+    assert (evidence["content_hash"], evidence["public_copy"]) == (current, kept)
+    assert evidence["records"] == [{"kind": "review", "p0": 0, "content_hash": current, "engine_version": VERSION}]
+
+
+def test_record_review_refuses_a_held_lock(engine: Engine) -> None:
+    _reviewable(engine)
+    before = _snapshot(engine)
+    lock = _lock(engine)
+    held = json.dumps({"pid": os.getpid(), "host": socket.gethostname()})
+    lock.write_text(held)
+    rc, payload, output = engine.run("record-review", SLUG)
+    assert rc == 1 and _codes(payload) == ["slug_locked"], output
+    assert lock.read_text() == held and _snapshot(engine) == before
+
+
+def test_record_review_prints_no_finding_or_claim_text(engine: Engine) -> None:
+    _checkable(engine)
+    _inputs(engine, claims={"claims": [{**FACT, "claim": PLANTED, "url": PLANTED_URL, "excerpt": FAKE_TERM}]})
+    _write_review(engine, _review_doc(engine, [_finding(1, "P0", category=PLANTED, location=PLANTED_URL)]))
+    for extra in ({}, {"content_hash": "f" * 64}):
+        if extra:
+            _write_review(engine, _review_doc(engine, [_finding(1, category=PLANTED)], **extra))
+        rc, payload, output = engine.run("record-review", SLUG)
+        assert payload, output
+        _no_leak(output)
+        assert FAKE_TERM not in output
+    for relative in (EVIDENCE, STATE):
+        text = (engine.blog / relative).read_text(encoding="utf-8")
+        _no_leak(text)
+        assert FAKE_TERM not in text

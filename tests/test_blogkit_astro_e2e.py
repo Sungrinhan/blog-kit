@@ -4,8 +4,8 @@ The site repo's committed tree (its HEAD) is copied into the S1 harness's temp
 blog repo, with the site's node_modules linked in. A fixture post with a local
 PNG, an SVG asset, a link to another page and an anchor in the same post goes
 through convert, check (real `astro check` and real draft preview build),
-approve and publish, with the review and learning records written by the test
-in place of the M2c producers. Then the real `npm run build` (prebuild runs
+approve and publish, with the review record written through record-review and
+the learning record written by the test in place of its M2c producer. Then the real `npm run build` (prebuild runs
 the site's verifier copy) and the copy's `--ci --dist dist` must pass, the
 built page's images, links and anchor must resolve inside dist, and removing
 the evidence must fail both.
