@@ -5,8 +5,9 @@ its own marketplace (`claude-blog@blog-kit`) owned by the fork owner. The
 existing catalog entries, including the optional companion, stay as they are.
 LICENSE keeps the upstream copyright line and adds one fork line under it.
 Fork-owned descriptions state the shipped skill directory count, name the
-fork skills and state the shipped agent count; upstream document bodies keep
-the upstream count (FORK.md).
+fork skills (the plugin manifest, capped below 400 characters, states their
+count instead) and state the shipped agent count; upstream document bodies
+keep the upstream count (FORK.md).
 
 Stdlib + pytest only.
 """
@@ -20,6 +21,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+UPSTREAM_SKILL_DIRS = 32
+FORK_SKILLS = ("blog-doctor", "blog-memo", "blog-interview")
 
 
 def _load(name: str) -> dict:
@@ -70,7 +73,12 @@ def test_fork_owned_descriptions_state_the_shipped_skill_count(surface: str) -> 
         text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     counts = re.findall(r"(\d+) skill directories", text)
     assert counts and set(counts) == {str(_skill_dirs())}
-    assert "blog-doctor" in text and "blog-memo" in text
+    assert _skill_dirs() == UPSTREAM_SKILL_DIRS + len(FORK_SKILLS)
+    if surface == "plugin.json":
+        assert f"incl. {len(FORK_SKILLS)} fork skills" in text
+    else:
+        for name in FORK_SKILLS:
+            assert name in text, name
     agents = re.findall(r"(\d+) (?:specialized sub)?agents", text)
     assert agents and set(agents) == {str(len(list((ROOT / "agents").glob("*.md"))))}
 
@@ -78,4 +86,5 @@ def test_fork_owned_descriptions_state_the_shipped_skill_count(surface: str) -> 
 def test_router_names_the_fork_skill_it_does_not_route() -> None:
     text = (ROOT / "skills" / "blog" / "SKILL.md").read_text(encoding="utf-8")
     assert "31 sub-skill directories plus this orchestrator" in text
-    assert "`blog-doctor`" in text
+    for name in FORK_SKILLS:
+        assert f"`{name}`" in text, name

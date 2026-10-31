@@ -4,8 +4,8 @@
 
 This repository contains **Claude Blog**, a Claude Code skill suite for blog content
 creation, optimization, and management. It follows the Agent Skills open standard and the
-3-layer architecture (directive, orchestration, execution). 34 skill directories
-(1 orchestrator + 31 sub-skills + the fork's `blog-doctor` install check and `blog-memo` pipeline command), 30 user-facing
+3-layer architecture (directive, orchestration, execution). 35 skill directories
+(1 orchestrator + 31 sub-skills + the fork's `blog-doctor` install check and `blog-memo` and `blog-interview` pipeline commands), 30 user-facing
 `/blog` commands, 6 specialized subagents (incl. the fork's `blog-reviewer-ko`), 12 content templates, and 22 reference docs are
 dual-optimized for Google rankings (2026 core and spam update timeline, E-E-A-T) and AI
 citations (GEO/AEO). Includes FLOW framework
@@ -57,7 +57,7 @@ claude-blog/
   scripts/doctor.py                  # blog-kit install doctor (fork)
   scripts/confidential_check.py      # Per-machine confidential-term check, no raw output (fork)
   # 24 scripts/*.py in total: `ls scripts/*.py | wc -l`
-  skills/                            # 34 skill directories (1 orchestrator + 31 sub-skills + blog-doctor + blog-memo)
+  skills/                            # 35 skill directories (1 orchestrator + 31 sub-skills + blog-doctor + blog-memo + blog-interview)
     blog/SKILL.md                   # Main orchestrator, routing, scoring
       references/                   # 22 on-demand knowledge files (5 in v1.8.0, 1 in v1.9.0)
       templates/                    # 12 content templates
@@ -118,6 +118,9 @@ claude-blog/
     blog-memo/                     # Summary memo + prerequisite check `/blog-memo` (fork, not routed)
       SKILL.md
       references/memo-template.md # Question-form blank memo, copied once per slug
+    blog-interview/                # Interview, research, draft, Korean review `/blog-interview` (fork, not routed)
+      SKILL.md
+      references/                 # decision-record template, Korean review rules, step contracts
   agents/                            # 6 specialized subagents (5 upstream + blog-reviewer-ko)
     blog-researcher.md              # Statistics and source research
     blog-writer.md                  # Content generation
