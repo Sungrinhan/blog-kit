@@ -32,6 +32,9 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `tests/test_confidential_text.py`: 기밀 검사 공통 함수를 모듈로 불러 확인. 임시 HOME의 가짜 금칙어로 `scan_text`의 분류·줄 번호 결과(md 밖 json·yaml 바이트 포함, NFD 입력, UTF-8 아닌 바이트 차단), 결과에 가짜 금칙어·원문 없음, 크기 상한(1MB) 긴 한 줄의 시간 제한, 목록 digest의 동등(주석·빈 줄·순서·대소문자·중복)·차이(단어 변경·삭제·추가)·없거나 빈 목록 차단
 - `scripts/load_blogkit_context.py`: M2c 맥락 로더(stdlib). 호출자는 묶음 이름(`memo`·`interview`·`draft`·`review`·`proposal`·`cross-review`, 스펙의 단계별 입력 범위 표)과 slug만 고르고 경로는 주지 않는다. 허용 파일(루트 VOICE·BRAND·DISCOURSE, `.blogkit/profile.yaml`, `.blogkit/principles`·`.blogkit/cards`의 직계 `<ID>.md`, 검증기 `inbox_file`의 메모·전제 지식 기록·인터뷰 답·근거 파일·교차 검토 결과)만 한 번 읽어 같은 바이트로 금칙어 검사(기밀 검사의 `scan_text`)를 하고, 업스트림 로더의 펜스 함수로 감싸 내보낸다. 금칙어·BOM·UTF-8 아님은 `skipped`에 경로와 이유 코드만, 메모는 상태 파일 기록이 엔진 `memo_cleared`로 통과할 때만. symlink·일반 파일 아님은 멈추고, 파일별 상한·종류별 200개·전체 2 MB·450개를 넘으면 `context_too_large`로 아무것도 내보내지 않는다. 묶음에 필수인 파일을 건너뛰면 `required_file_skipped`. 프로필 최소판(`language`·`audience`·`default_template`·`time_budget_minutes`) 엄격 파싱, 없으면 기본값과 `profile_missing` 경고. 출력은 머리말(우선순위, 원칙은 근거가 아님, 카드 용도), 파일마다 라벨 줄과 펜스, 맨 끝 요약 표식 줄과 JSON(내보낸 바이트의 digest, 건너뛴 파일, 프로필 값, 경고). 교차 검토 묶음은 상태 블록 `cross_review`가 done이고 그 내용 해시가 설치된 검증기의 `content_hash()`로 계산한 현재 해시와 같을 때만 결과를 읽어 금칙어 검사·펜스를 거쳐 내보내고, 아니면 읽지 않고 `cross_review_not_done`(skipped·blocked·null·상태 파일 없음)·`cross_review_stale`(다른 해시)로, done인데 결과 파일이 없으면 `cross_review_missing`으로 건너뛴다(선택 단계라 필수 파일 없음). 상태 파일 손상·해시를 계산할 수 없는 공개본은 멈춘다
 - `tests/test_load_blogkit_context.py`: S2. 임시 블로그 레포와 임시 HOME의 가짜 금칙어로 묶음별 허용 파일, 허용 밖·하위 폴더·점 파일 무시, symlink(파일·폴더·블로그 레포), 파일별·전체 크기·종류별 개수 상한에서 아무것도 내보내지 않음, 요약 digest와 내보낸 바이트 일치, 금칙어 파일 건너뜀과 출력 비노출, 메모 통과 조건(상태 없음·기록 없음·digest 불일치·미확인·차단·검사기 버전·목록 변경), 가짜 닫는 표식과 가짜 요약으로 펜스 탈출 불가, 프로필 정상·없음·오류, 필수 파일 누락, 교차 검토 묶음(done·해시 일치 → 내보냄, 공개본 수정·다른 해시 → `cross_review_stale`, skipped·blocked·null·상태 파일 없음 → `cross_review_not_done`, 결과 파일 없음, 금칙어, 상한, 상태 손상·공개본 없음·결과 symlink는 멈춤), 최악 입력 시간 제한 확인. 메모 통과 기록은 엔진의 `update_state`와 digest 규칙으로 준비
+- `agents/blog-reviewer-ko.md`: M2c 한국어 검수 에이전트(도구 Read·Grep·Glob뿐). 공개본은 경로로만 Read하고, 인터뷰 답·근거 파일은 오케스트레이터가 넘긴 펜스 본문으로만 받으며 비공개 폴더를 직접 읽지 않음. 한국어 검수 규칙을 따라 `record-review`가 받는 JSON 하나로 답하고, 내용 해시·입력 digest는 받은 값을 그대로 돌려줌. 점수 없음
+- `skills/blog-interview/references/korean-review-rules.md`: 한국어 검수 규칙. P0 네 종류(인터뷰 답 ID 없는 내 철학, 발췌가 뒷받침하지 않거나 `unconfirmed`이거나 없는 ID에 기댄 공개 사실, 대안의 부당한 약화, 회사를 특정할 수 있는 서술)와 범주 이름, 실제 뒷받침 여부로 판정, P1~P3 참고 범주, 영어 지표·점수 없음, 엔진 `review_result()`와 같은 출력 스키마와 예시. 같은 폴더의 `SKILL.md`는 M2c-13이 더하며, 그 전에는 독립 설치 스크립트가 이 폴더를 복사하지 않음(`SKILL.md` 있는 폴더만 설치)
+- `tests/test_blog_reviewer_ko.py`: S3. 에이전트 도구가 정확히 Read·Grep·Glob, 규칙 파일의 P0 네 종류 문구와 범주 이름, 출력 예시 JSON이 엔진 `review_result()`를 통과하고 P0 수가 맞음, 영어 지표·점수 키 없음, 에이전트·규칙 본문의 비공개 경로 언급은 금지 문장뿐
 - `docs/BLOG-KIT-UPGRADE.md`: 블로그 레포 설정 예시와 설치·업그레이드·다운그레이드 순서(재시작 뒤 `sync-verifier` → 사본 커밋 → 설치 점검), uninstall 금지, 런타임 경로 첫 전환, 보존 확인
 - `docs/BLOG-KIT-HUMAN-CHECK.md`: 두 기기 설치·전환 사람 검증 기록 양식과 단계별 기대 설치 점검 결과
 
@@ -40,7 +43,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 업스트림 파일을 직접 고친 곳. 업스트림 병합 때 충돌 후보다.
 
 - `.gitignore`: `/flow` 작업 폴더(`.scratch/`)와 외부 도구가 만드는 로컬 전용 Codex용 사본(`/AGENTS.md`, `/.agents/`) 제외
-- `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가. 스킬 폴더 수(33)·스크립트 수(24)와 구조도에 `blog-doctor`·`scripts/doctor.py`·`scripts/confidential_check.py`
+- `CLAUDE.md`: 에이전트 스킬 설정 절(이슈 트래커, triage 라벨, 도메인 문서) 추가. 스킬 폴더 수(33)·스크립트 수(24)와 구조도에 `blog-doctor`·`scripts/doctor.py`·`scripts/confidential_check.py`. 에이전트 수(6)와 구조도에 `blog-reviewer-ko`
 - `.claude-plugin/marketplace.json`: 마켓 이름 `blog-kit`, owner를 포크 소유자로, `claude-blog` 설명의 스킬 폴더 수를 33개로. 기존 항목(동반 플러그인 포함)은 그대로
 - `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.N`, repository·homepage를 포크 저장소로, 설명의 스킬 폴더 수를 33개(`blog-doctor` 포함)로. 이름·author는 업스트림 그대로
 - `.github/ISSUE_TEMPLATE/config.yml`: 토론·보안 제보·문서 안내 URL을 포크 저장소로
@@ -64,7 +67,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `skills/blog-translate/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
 - `skills/blog-image/scripts/setup_image_mcp.py`: 대상 선택을 `--project-dir <블로그 레포>`(그 폴더의 `.mcp.json`)와 `--global`(사용자 범위 MCP를 실제로 읽는 `~/.claude.json`, `CLAUDE_CONFIG_DIR`가 있으면 그 폴더의 `.claude.json`. 다른 키·서버 보존, 쓰는 도중 Claude Code가 고치면 다시 읽어 우리 항목만 다시 적용) 둘 중 하나로. 설치본(기본·활성 설정 폴더의 플러그인 폴더 안)에서 둘 다 없으면 오류로 멈추고 아무것도 쓰지 않음, 빈 `--project-dir`도 오류, 개발 체크아웃은 자기 루트 자동 탐색만 허용하고 실패하면 전역으로 넘어가지 않음. 설정·확인·제거가 같은 규칙. 업스트림 `--project`는 대상 없음과 같은 뜻으로 유지
 - `skills/blog-image/scripts/validate_image_setup.py`: 설정 확인도 설정 도우미의 대상 선택 규칙(`resolve_target`)을 그대로 써서 그 한 파일만 읽음(`--project-dir`·`--global`, 설치본에서 둘 다 없으면 오류). 플러그인 루트 `.mcp.json`과 예전 `~/.claude/settings.json`으로 넘어가지 않음
-- `tests/test_skill_frontmatter.py`: 스킬 폴더 수 단언을 업스트림 32개 + `blog-doctor` = 33개로
+- `tests/test_skill_frontmatter.py`: 스킬 폴더 수 단언을 업스트림 32개 + `blog-doctor` = 33개로, 에이전트 수 단언을 업스트림 5개 + `blog-reviewer-ko` = 6개로
 - `tests/test_scripts_wave3_image.py`: 기존 전역 설정 테스트를 `~/.claude.json` 기대값과 새 함수 인자로. 임시 HOME·설치본 흉내로 대상 선택 사례(대상 없음·경로·전역·둘 다·자동 탐색 실패·성공, `--project`)를 설정·확인·제거와 설정 확인 스크립트에 대해 확인
 - `tests/test_release_safeguards.py`: 검사기 픽스처를 포크 값으로, 마켓 이름 단언을 `blog-kit`으로. 업스트림 보안 checkout 안내 필수 테스트를 포크 보안 URL·설치 스크립트 제외·author 유지 테스트로 교체
 - `tests/test_version_coherence.py`: 버전 표면 비교를 대응 규칙으로(`2.3.1-kit.N` ↔ `2.3.1+kit.N`, 접미사 없는 형식도 수용), 기준 버전을 plugin.json으로, 임시 폴더 픽스처로 일치·불일치 확인

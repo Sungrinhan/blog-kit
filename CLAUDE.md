@@ -6,7 +6,7 @@ This repository contains **Claude Blog**, a Claude Code skill suite for blog con
 creation, optimization, and management. It follows the Agent Skills open standard and the
 3-layer architecture (directive, orchestration, execution). 33 skill directories
 (1 orchestrator + 31 sub-skills + the fork's `blog-doctor` install check), 30 user-facing
-`/blog` commands, 5 specialized subagents, 12 content templates, and 22 reference docs are
+`/blog` commands, 6 specialized subagents (incl. the fork's `blog-reviewer-ko`), 12 content templates, and 22 reference docs are
 dual-optimized for Google rankings (2026 core and spam update timeline, E-E-A-T) and AI
 citations (GEO/AEO). Includes FLOW framework
 integration, semantic topic-cluster planning + execution, multilingual publishing (Pro Hub
@@ -115,12 +115,13 @@ claude-blog/
     blog-style/SKILL.md            # Author voice-profile learner (v1.10.0)
     blog-decay/SKILL.md            # GSC content-decay detector (v1.10.0)
     blog-doctor/SKILL.md           # blog-kit install check `/blog-doctor` (fork, not routed)
-  agents/                            # 5 specialized subagents
+  agents/                            # 6 specialized subagents (5 upstream + blog-reviewer-ko)
     blog-researcher.md              # Statistics and source research
     blog-writer.md                  # Content generation
     blog-seo.md                     # SEO validation
     blog-reviewer.md                # Quality scoring (no Bash, post v1.7.0 hardening)
     blog-translator.md              # Multilingual translation (no Bash, v1.7.0)
+    blog-reviewer-ko.md             # Korean P0 review for /blog-interview, JSON for record-review (fork, no Bash)
   tests/                             # pytest suite incl. delivery-contract + security suites (count: `python3 -m pytest --collect-only -q | tail -1`)
 ```
 
