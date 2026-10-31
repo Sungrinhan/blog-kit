@@ -367,6 +367,37 @@ def test_the_total_output_cap_stops_the_load_with_nothing_exported(world: World)
     assert rc == 0, output
 
 
+def test_a_summary_that_would_take_the_output_over_the_cap_stops_the_load(world: World) -> None:
+    # Small files whose every line is a heuristic warning: the fences stay far under 2 MB, the summary does not.
+    _full_repo(world)
+    for number in range(3):
+        world.write(f".blogkit/cards/c-warn-{number}.md", "10.0.0.1\n" * 7000)
+    rc, summary, body, output = world.load("memo")
+    assert rc == 1 and _codes(summary) == ["context_too_large"], output[-2000:]
+    _nothing_exported(body, output)
+    assert summary["files"] == [] and summary["warnings"] == []
+    assert len(output.encode("utf-8")) <= 2 * 1024 * KB
+    for number in range(3):
+        world.write(f".blogkit/cards/c-warn-{number}.md", "10.0.0.1\n" * 100)
+    rc, summary, body, output = world.load("memo")
+    assert rc == 0 and len([w for w in summary["warnings"] if w["code"] == "heuristic"]) == 300, output[-2000:]
+
+
+def test_skipped_names_that_would_take_the_output_over_the_cap_stop_the_load(world: World) -> None:
+    # Names outside the ID grammar are skipped by path; control characters escape to six bytes each in
+    # JSON, so 1980 such names make the skipped list alone larger than 2 MB.
+    _full_repo(world)
+    name = "\x01" * 248
+    for folder in ("principles", "cards"):
+        for number in range(990):  # under the folder entry cap, so both folders are listed
+            (world.blog / ".blogkit" / folder / f"{number:03d}{name}.md").write_bytes(b"x\n")
+    rc, summary, body, output = world.load("memo")
+    assert rc == 1 and _codes(summary) == ["context_too_large"], output[-2000:]
+    _nothing_exported(body, output)
+    assert summary["skipped"] == []
+    assert len(output.encode("utf-8")) <= 2 * 1024 * KB
+
+
 def test_more_than_200_files_of_one_kind_stops_the_load(world: World) -> None:
     _full_repo(world)
     for number in range(199):

@@ -54,9 +54,10 @@ with "." is ignored (a proposal being written), a subfolder or a name outside
 the proposal ID rule (^[a-z0-9][a-z0-9-]{0,63}$ plus ".md") is skipped as
 not_allowed. A folder with more than 1000 entries, more than 200 files of
 one kind, more than 450 exported files, a file over its cap or an output
-over 2 MB stops the load as context_too_large and nothing is exported. A
-symlink on any path component, and a file or folder that is not a regular
-file or folder, stops the load the same way with its own code.
+over 2 MB (the fences, the summary marker and the summary JSON with its
+warnings, all counted) stops the load as context_too_large and nothing is
+exported. A symlink on any path component, and a file or folder that is
+not a regular file or folder, stops the load the same way with its own code.
 
 Each file is read once (no symlink, a regular file, at most its cap) and
 those bytes are the ones checked and exported. A leading BOM is skipped as
@@ -466,7 +467,14 @@ def main(argv: list[str] | None = None) -> int:
     if not report["nonce"]:  # the upstream helper did not load; the marker still needs a fresh nonce
         report["nonce"] = secrets.token_hex(16)
     summary = SUMMARY_MARKER.format(nonce=report["nonce"])
-    sys.stdout.write(f"{text}{summary}\n{json.dumps(report, indent=2, ensure_ascii=False)}\n")
+    output = f"{text}{summary}\n{json.dumps(report, indent=2, ensure_ascii=False)}\n"
+    if len(output.encode("utf-8")) > MAX_OUTPUT_BYTES:
+        # The whole output (fences, marker and summary with its warnings and skipped paths) is over
+        # the cap: export nothing and drop every list, so the failure summary stays small.
+        report.update(status="fail", files=[], skipped=[], profile=None, warnings=[],
+                      errors=[{"code": "context_too_large", "path": ""}])
+        output = f"{summary}\n{json.dumps(report, indent=2, ensure_ascii=False)}\n"
+    sys.stdout.write(output)
     return 0 if report["status"] == "ok" else 1
 
 

@@ -4008,6 +4008,93 @@ def test_a_stop_after_the_link_shows_as_an_existing_target(engine: Engine) -> No
     assert _dotfiles(engine, PRINCIPLES) == []
 
 
+PROPOSAL_EDIT = '''\
+"""Test bootstrap: change the pending proposal once, at the first fsync (before the link) or right after the link."""
+import os
+import runpy
+import sys
+
+cli, mode, pending = sys.argv[1], sys.argv[2], sys.argv[3]
+real = {"fsync": os.fsync, "link": os.link}
+done = []
+
+
+def change():
+    if done:
+        return
+    done.append(True)
+    if mode.endswith("-edit"):
+        with open(pending, "a", encoding="utf-8") as handle:
+            handle.write("edited while the proposal was being accepted\\n")
+    else:  # the same bytes as a new file in its place
+        with open(pending, "rb") as handle:
+            data = handle.read()
+        with open(pending + ".new", "wb") as handle:
+            handle.write(data)
+        os.replace(pending + ".new", pending)
+
+
+def fsync(*args):
+    if mode.startswith("fsync-"):
+        change()
+    return real["fsync"](*args)
+
+
+def link(*args, **kwargs):
+    result = real["link"](*args, **kwargs)
+    if mode.startswith("link-"):
+        change()
+    return result
+
+
+os.fsync = fsync
+os.link = link
+sys.argv = [cli, *sys.argv[4:]]
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
+def _proposal_edit(engine: Engine, mode: str) -> Path:
+    script = engine.tmp / "proposal-edit.py"
+    script.write_text(PROPOSAL_EDIT)
+    pending = engine.blog / PENDING / "fake-rule.md"
+    wrapper = engine.tmp / f"run-proposal-edit-{mode}.py"
+    wrapper.write_text(
+        "import runpy, sys\n"
+        f"sys.argv = [{str(script)!r}, {str(engine.cli)!r}, {mode!r}, {str(pending)!r}, *sys.argv[1:]]\n"
+        f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    return wrapper
+
+
+EDITED_PROPOSAL = PRINCIPLE_TEXT + "edited while the proposal was being accepted\n"
+
+
+def test_a_proposal_changed_before_the_link_is_not_registered_and_kept(engine: Engine) -> None:
+    _proposal(engine)
+    rc, payload, output = _accept(engine, script=_proposal_edit(engine, "fsync-edit"))
+    assert rc == 1 and payload["errors"] == [
+        {"code": "proposal_changed_during_accept", "path": f"{PENDING}/fake-rule.md"}], output
+    assert payload["registered"] is False and payload["target"] == f"{PRINCIPLES}/fake-rule.md", output
+    assert not (engine.blog / PRINCIPLES / "fake-rule.md").exists()
+    assert _dotfiles(engine, PRINCIPLES) == []
+    assert (engine.blog / PENDING / "fake-rule.md").read_text(encoding="utf-8") == EDITED_PROPOSAL
+
+
+@pytest.mark.parametrize("mode,kept", [("link-edit", EDITED_PROPOSAL), ("link-replace", PRINCIPLE_TEXT)],
+                         ids=["edited", "replaced"])
+def test_a_proposal_changed_after_the_link_is_kept_and_the_target_reported(engine: Engine, mode: str,
+                                                                           kept: str) -> None:
+    _proposal(engine)
+    rc, payload, output = _accept(engine, script=_proposal_edit(engine, mode))
+    assert rc == 1 and payload["errors"] == [
+        {"code": "proposal_changed_during_accept", "path": f"{PENDING}/fake-rule.md"}], output
+    assert payload["registered"] is True and payload["target"] == f"{PRINCIPLES}/fake-rule.md", output
+    assert (engine.blog / PRINCIPLES / "fake-rule.md").read_text(encoding="utf-8") == PRINCIPLE_TEXT
+    assert _dotfiles(engine, PRINCIPLES) == []
+    assert (engine.blog / PENDING / "fake-rule.md").read_text(encoding="utf-8") == kept
+
+
 def _run_loader(engine: Engine, bundle: str) -> tuple[int, str, dict]:
     """Run the context loader on this blog repo the way the skills do; exit code, output, summary."""
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
@@ -4180,3 +4267,56 @@ def test_the_proposal_parser_stays_fast_on_worst_case_input(engine: Engine, text
     rc, payload, output = _accept(engine)
     assert rc == 1 and _codes(payload)[0].startswith("proposal_"), output
     assert (engine.blog / PENDING / "fake-rule.md").exists()
+
+
+# ------------------------------------------------------------------ the state file is checked before anything is saved
+
+
+def _saved(engine: Engine) -> dict[str, bytes | None]:
+    """The evidence, the state file and the cross-review result as they are on disk."""
+    found = {}
+    for relative in (EVIDENCE, STATE, CROSS_REVIEW):
+        path = engine.blog / relative
+        found[relative] = path.read_bytes() if path.exists() else None
+    return found
+
+
+def _state_at_the_cap(engine: Engine) -> None:
+    """A valid state file so close to 64 KB that setting any section would go over."""
+    block = _state_block(engine) if (engine.blog / STATE).exists() else EMPTY_STATE
+    size = len(_write_state(engine, block, "", "\n"))
+    _write_state(engine, block, "a" * (64 * 1024 - size - 8) + "\n", "\n")
+    assert 64 * 1024 - 16 < (engine.blog / STATE).stat().st_size <= 64 * 1024
+
+
+def _review_ready(e: Engine) -> None:
+    _reviewable(e)
+
+
+def _learning_ready(e: Engine) -> None:
+    _learnable(e)
+    _write_learning(e, _learning_doc(e))
+
+
+STATE_FIRST = {
+    "record-review": _review_ready,
+    "record-learning": _learning_ready,
+    "cross-review": _cross_reviewable,
+    "memo-check": _ready_memo,
+}
+
+
+@pytest.mark.parametrize("command", STATE_FIRST, ids=STATE_FIRST.keys())
+@pytest.mark.parametrize("break_state,code", [
+    (_block('{"version": 1,'), "state_invalid"),
+    (_state_at_the_cap, "state_too_large"),
+], ids=["broken", "at-the-cap"])
+def test_a_state_file_that_cannot_take_the_record_saves_nothing(engine: Engine, command: str, break_state,
+                                                                code: str) -> None:
+    STATE_FIRST[command](engine)
+    break_state(engine)
+    before = _saved(engine)
+    rc, payload, output = engine.run(command, SLUG)
+    assert rc == 1 and _codes(payload) == [code], output
+    assert _saved(engine) == before
+    assert _codex_calls(engine) == []

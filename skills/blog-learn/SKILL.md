@@ -276,6 +276,7 @@ python3 "${CLAUDE_SKILL_DIR}/../../adapters/astro/blogkit.py" accept-proposal "<
 ```
 
 - `proposal_target_exists`(같은 이름의 원칙·카드가 이미 있음)나 `proposal_digest_mismatch`면 엔진은 옮기지 않고 제안을 남긴다. 사람이 확인한다.
+- `proposal_changed_during_accept`(반영하는 사이 제안 파일이 바뀌거나 교체됨)면 엔진은 제안을 지우지 않고 남긴다. `registered`가 true면 처음 승인한 바이트로 목적지는 이미 등록됐으므로, 사람이 바뀐 제안과 목적지를 비교해 정리한다.
 - 제안 반영(`accept-proposal`)과 발행 승인(`approve`)은 서로 다른 동작이다. 어느 하나가 다른 하나를 대신하지 않는다. 이 스킬은 원칙·카드를 확정하지 않는다.
 
 인터뷰 답, 근거 발췌, 펜스 본문, 금칙어 검사에 걸린 파일의 내용을 끝 보고에 옮겨 보여 주지 않는다. 보여 주는 것은 코드, 경로, 개수, ID, digest, 질문과 판정이다.

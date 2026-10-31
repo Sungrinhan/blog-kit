@@ -351,6 +351,8 @@ STATE_SECTIONS = {
                      "reason": "code"},
 }
 CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# The longest cross_review record: cross-review checks the state file can take it before deleting anything.
+LARGEST_CROSS_REVIEW = {"content_hash": "0" * 64, "status": "skipped", "reason": "a" * 64}
 # record-review: the interview answers, the claims file and the review result.
 MAX_INPUT_BYTES = 256 * 1024
 MAX_CLAIMS = 500
@@ -2278,12 +2280,13 @@ def read_state(blog: Path, verifier, slug: str) -> dict:
     return found[2] if found else {"version": STATE_VERSION, **{name: None for name in STATE_SECTIONS}}
 
 
-def update_state(blog: Path, verifier, slug: str, section: str, value) -> dict:
-    """Set one section of the state block and save the file atomically.
+def planned_state(blog: Path, verifier, slug: str, section: str, value) -> tuple[dict, bytes]:
+    """The new block and file bytes for setting one section; nothing is written.
 
-    The text outside the block stays byte for byte; a missing file is made
-    with STATE_BODY and four null sections first. A file that does not parse
-    is never written. Returns the new block.
+    state_invalid when the file does not parse or the new block is outside
+    the schema, state_too_large when the new file would pass MAX_STATE_BYTES.
+    Commands that save evidence or another file call this first, so a state
+    file that cannot take their record stops them before anything is saved.
     """
     relative = verifier.inbox_file(slug, "state")
     if section not in STATE_SECTIONS:
@@ -2296,6 +2299,18 @@ def update_state(blog: Path, verifier, slug: str, section: str, value) -> dict:
     data = f"{before}{STATE_OPEN}{STATE_FENCE_OPEN}{block}{STATE_FENCE_CLOSE}{STATE_CLOSE}{after}".encode("utf-8")
     if len(data) > MAX_STATE_BYTES:
         raise CliError("state_too_large", relative)
+    return state, data
+
+
+def update_state(blog: Path, verifier, slug: str, section: str, value) -> dict:
+    """Set one section of the state block and save the file atomically.
+
+    The text outside the block stays byte for byte; a missing file is made
+    with STATE_BODY and four null sections first. A file that does not parse
+    is never written. Returns the new block.
+    """
+    relative = verifier.inbox_file(slug, "state")
+    state, data = planned_state(blog, verifier, slug, section, value)
     path = blog / relative
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     refuse_symlinks(blog, f"{verifier.inbox_folder(slug)}/{temp.name}")
@@ -2555,9 +2570,11 @@ def record_review(blog: Path, slug: str, verifier) -> dict:
     hash (review_stale) and the current interview and claims digests
     (review_inputs_changed). The engine counts P0 itself. The same inputs and
     result as recorded change nothing. Otherwise, after the hash and the
-    three digests are read again (a change records nothing), the evidence
-    drops gate 4, learning and approval and takes the new review record, and
-    then the state's review_inputs are saved. A stop between the two saves
+    three digests are read again (a change records nothing) and the state
+    file is checked to take review_inputs (state_invalid, state_too_large:
+    nothing is saved), the evidence drops gate 4, learning and approval and
+    takes the new review record, and then the state's review_inputs are
+    saved. A stop between the two saves
     leaves review_inputs behind, which check, status and approve refuse until
     record-review runs again.
     """
@@ -2597,6 +2614,7 @@ def record_review(blog: Path, slug: str, verifier) -> dict:
             same = False
         if not same:
             raise CliError("input_changed_during_record", relative)
+    planned_state(blog, verifier, slug, "review_inputs", inputs)
     _save_evidence(blog, verifier, slug, evidence)
     update_state(blog, verifier, slug, "review_inputs", inputs)
     return {**result, "changed": True}
@@ -2645,9 +2663,10 @@ def record_learning(blog: Path, slug: str, verifier) -> dict:
     only when the evidence holds this exact learning record and the state's
     learning_inputs hold this digest; a record dropped by a new review is
     written again. Otherwise, after the hash, the learning digest and the
-    review inputs are read again (a change records nothing), the evidence
-    drops learning and approval and takes the new record, and then the
-    state's learning_inputs are saved. A stop between the two saves leaves
+    review inputs are read again (a change records nothing) and the state
+    file is checked to take learning_inputs (nothing is saved otherwise),
+    the evidence drops learning and approval and takes the new record, and
+    then the state's learning_inputs are saved. A stop between the two saves leaves
     learning_inputs behind, which status and approve refuse with
     learning_inputs_changed until record-learning runs again.
     """
@@ -2682,6 +2701,7 @@ def record_learning(blog: Path, slug: str, verifier) -> dict:
         raise CliError("input_changed_during_record", relative)
     if not review_inputs_match(blog, verifier, slug, current):
         raise CliError("review_inputs_changed")
+    planned_state(blog, verifier, slug, "learning_inputs", inputs)
     _save_evidence(blog, verifier, slug, evidence)
     update_state(blog, verifier, slug, "learning_inputs", inputs)
     return {**result, "changed": True}
@@ -2779,6 +2799,8 @@ def _save_cross_review(blog: Path, verifier, slug: str, current: str, status: st
     """Save the result (done only) and the state's cross_review once the content hash is still current."""
     if _current_hash(blog, verifier, slug) != current:
         raise CliError("content_changed_during_check", verifier.post_path_for(slug))
+    record = {"content_hash": current, "status": status, "reason": reason}
+    planned_state(blog, verifier, slug, "cross_review", record)
     if result is not None:
         relative = verifier.inbox_file(slug, "cross_review")
         path = blog / relative
@@ -2794,7 +2816,7 @@ def _save_cross_review(blog: Path, verifier, slug: str, current: str, status: st
             except OSError:
                 pass
             raise CliError("cross_review_write_failed", relative) from None
-    update_state(blog, verifier, slug, "cross_review", {"content_hash": current, "status": status, "reason": reason})
+    update_state(blog, verifier, slug, "cross_review", record)
     return {"status": status, "reason": reason}
 
 
@@ -2808,8 +2830,11 @@ def cross_review(blog: Path, slug: str, verifier) -> dict:
     afterwards. A term records blocked and raises cross_review_blocked
     without running Codex. A missing Codex, or one that fails, times out or
     gives no verdict twice, records skipped with the reason; output is the
-    status and reason only.
+    status and reason only. Before the earlier result is deleted, the state
+    file must take the largest cross_review record (state_invalid,
+    state_too_large), so a state file that cannot take the record keeps it.
     """
+    planned_state(blog, verifier, slug, "cross_review", LARGEST_CROSS_REVIEW)
     result_path = verifier.inbox_file(slug, "cross_review")
     refuse_symlinks(blog, result_path)
     (blog / result_path).unlink(missing_ok=True)
@@ -2957,8 +2982,40 @@ def _target_exists(blog: Path, verifier, target: str, data: bytes) -> CliError:
     return CliError("proposal_target_exists", target, same=same)
 
 
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    """st_dev and st_ino of the regular file at path (not followed), None otherwise."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino) if stat.S_ISREG(info.st_mode) else None
+
+
+def _proposal_unchanged(path: Path, identity: tuple[int, int] | None, digest: str) -> bool:
+    """Whether path is still the same regular file (st_dev, st_ino) holding the bytes of digest."""
+    if identity is None:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return False
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != identity:
+            return False
+        data = handle.read(MAX_NOTE_BYTES + 1)
+    return len(data) <= MAX_NOTE_BYTES and _sha256(data) == digest
+
+
 def accept_proposal(blog: Path, pid: str, digest: str, verifier) -> dict:
-    """Move .blogkit/pending/<pid>.md to its kind folder as <pid>.md, never over a file."""
+    """Move .blogkit/pending/<pid>.md to its kind folder as <pid>.md, never over a file.
+
+    The proposal is read once and its file identity (st_dev, st_ino) taken.
+    Just before the link and again just before the proposal is removed, the
+    file must still be that file with the approved bytes; otherwise
+    proposal_changed_during_accept keeps the proposal (an edit is never
+    removed) and says whether the target is already registered.
+    """
     relative = f"{PENDING_FOLDER}/{pid}.md"
     refuse_symlinks(blog, relative)
     if not os.path.lexists(blog / relative):
@@ -2966,6 +3023,7 @@ def accept_proposal(blog: Path, pid: str, digest: str, verifier) -> dict:
     data = _read(verifier, blog, relative, MAX_NOTE_BYTES)
     if _sha256(data) != digest:
         raise CliError("proposal_digest_mismatch", relative)
+    identity = _file_identity(blog / relative)
     kind, _ = parse_proposal(data, relative, verifier)
     folder = PROPOSAL_FOLDERS[kind]
     leftover = _kind_folder(blog, folder, pid)
@@ -2978,6 +3036,9 @@ def accept_proposal(blog: Path, pid: str, digest: str, verifier) -> dict:
     temp = blog / folder / f".{pid}.md.tmp"
     try:
         _write_new(temp, data)
+        if not _proposal_unchanged(blog / relative, identity, digest):
+            temp.unlink()
+            raise CliError("proposal_changed_during_accept", relative, target=target, registered=False)
         os.link(temp, blog / target)
     except FileExistsError:
         temp.unlink(missing_ok=True)
@@ -2986,6 +3047,8 @@ def accept_proposal(blog: Path, pid: str, digest: str, verifier) -> dict:
         temp.unlink(missing_ok=True)
         raise CliError("proposal_write_failed", target) from None
     temp.unlink()
+    if not _proposal_unchanged(blog / relative, identity, digest):
+        raise CliError("proposal_changed_during_accept", relative, target=target, registered=True)
     (blog / relative).unlink()
     return {"id": pid, "kind": kind, "target": target, "digest": digest, "removed": relative,
             "leftover_removed": leftover}
