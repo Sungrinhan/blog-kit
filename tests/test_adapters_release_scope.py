@@ -6,11 +6,15 @@ marketplace slugs and raw installer links. It does not know adapters/, which
 the fork adds and ships in the plugin, so this test applies the same patterns
 there without patching the upstream checker.
 
-M2b adds its features without patching upstream: since the commit M2b started
-from (recorded in FORK.md), an upstream file (one present at FORK.md's
-upstream base commit) may change only in its version lines, unless it is
-CHANGELOG.md or the developer document CLAUDE.md. A clone without either
-commit skips that check.
+Milestones add their features without patching upstream. An upstream file
+(one present at FORK.md's upstream base commit) may change only in its version
+lines, except for a fixed set of exact paths per milestone range:
+- M2b, from its start commit to the M2c start commit (both recorded in
+  FORK.md): CHANGELOG.md and the developer document CLAUDE.md.
+- M2c, from its start commit to the working tree: the plugin and marketplace
+  manifests, CLAUDE.md, CHANGELOG.md, the router skills/blog/SKILL.md (fork
+  skill sentence) and tests/test_skill_frontmatter.py (count expectations).
+A clone without a recorded commit skips that range's check.
 
 Stdlib + pytest only. No network: fixtures are local temp git repos.
 """
@@ -28,7 +32,16 @@ ROOT = Path(__file__).resolve().parent.parent
 ADAPTERS = ROOT / "adapters"
 BASE_RE = re.compile(r"업스트림 기준 커밋: `([0-9a-f]{40})`")
 M2B_BASE_RE = re.compile(r"M2b 시작 커밋: `([0-9a-f]{40})`")
+M2C_BASE_RE = re.compile(r"M2c 시작 커밋: `([0-9a-f]{40})`")
 WHOLE_FILE_EDITS = frozenset({"CHANGELOG.md", "CLAUDE.md"})
+M2C_WHOLE_FILE_EDITS = frozenset({
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    "CLAUDE.md",
+    "CHANGELOG.md",
+    "skills/blog/SKILL.md",
+    "tests/test_skill_frontmatter.py",
+})
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+[-+]kit\.\d+")
 
 
@@ -70,21 +83,26 @@ def test_the_scan_detects_a_planted_private_reference(tmp_path: Path) -> None:
     assert ("private_repository_url", "astro/x.py") in _findings(checker, tmp_path)
 
 
-# ------------------------------------------------------------------ M2b upstream scope
+# ------------------------------------------------------------------ upstream scope per milestone
 
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout
 
 
-def upstream_scope_problems(root: Path, upstream_base: str, since: str) -> list[str]:
-    """Upstream files the working tree changed since `since` in more than their version lines."""
+def upstream_scope_problems(root: Path, upstream_base: str, since: str, until: str | None = None,
+                            whole_file_edits: frozenset[str] = WHOLE_FILE_EDITS) -> list[str]:
+    """Upstream files changed from `since` to `until` (default: the working tree) beyond their version lines.
+
+    Paths in `whole_file_edits` are exact repo-relative paths that may change freely in that range.
+    """
+    span = (since,) if until is None else (since, until)
     problems = []
-    for path in sorted(p for p in _git(root, "diff", "--name-only", "-z", since).split("\0") if p):
+    for path in sorted(p for p in _git(root, "diff", "--name-only", "-z", *span).split("\0") if p):
         upstream = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{upstream_base}:{path}"],
                                   capture_output=True, check=False).returncode == 0
-        if path in WHOLE_FILE_EDITS or not upstream:
+        if path in whole_file_edits or not upstream:
             continue
-        lines = _git(root, "diff", "-a", "-U0", since, "--", path).splitlines()
+        lines = _git(root, "diff", "-a", "-U0", *span, "--", path).splitlines()
         edits = [line for line in lines if line[:1] in "+-" and not line.startswith(("+++ ", "--- "))]
         if not edits or any(not VERSION_RE.search(line) for line in edits):
             problems.append(f"upstream file changed beyond its version line: {path}")
@@ -133,13 +151,105 @@ def test_a_deleted_upstream_file_is_out_of_scope(repo) -> None:
     assert upstream_scope_problems(root, base, base) == ["upstream file changed beyond its version line: plugin.json"]
 
 
-def test_m2b_changes_upstream_files_only_in_version_surfaces_changelog_and_developer_docs() -> None:
+# ------------------------------------------------------------------ M2c upstream scope
+
+M2C_FIXTURE_FILES = (
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    "CLAUDE.md",
+    "CHANGELOG.md",
+    "skills/blog/SKILL.md",
+    "tests/test_skill_frontmatter.py",
+    "skills/blog-write/SKILL.md",
+    "skills/blog/references/notes.md",
+    "docs/CLAUDE.md",
+)
+
+
+@pytest.fixture
+def m2c_repo(repo) -> tuple[Path, str, str]:
+    """The upstream base, then an M2c start commit that adds the M2c-scoped upstream paths upstream."""
+    root, _ = repo
+    for relative in M2C_FIXTURE_FILES:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(f"# {relative}\n")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "upstream with skills")
+    base = _git(root, "rev-parse", "HEAD").strip()
+    (root / "fork.md").write_text("fork notes\n")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "m2c start")
+    return root, base, _git(root, "rev-parse", "HEAD").strip()
+
+
+def test_m2c_allows_edits_beyond_version_lines_only_in_its_six_upstream_paths(m2c_repo) -> None:
+    root, base, m2c = m2c_repo
+    for relative in M2C_WHOLE_FILE_EDITS:
+        with (root / relative).open("a", encoding="utf-8") as handle:
+            handle.write("- fork skill sentence\n")
+    assert len(M2C_WHOLE_FILE_EDITS) == 6
+    assert upstream_scope_problems(root, base, m2c, whole_file_edits=M2C_WHOLE_FILE_EDITS) == []
+
+
+@pytest.mark.parametrize("relative", ["skills/blog-write/SKILL.md", "skills/blog/references/notes.md",
+                                      "docs/CLAUDE.md", "plugin.json"])
+def test_m2c_rejects_edits_beyond_version_lines_elsewhere(m2c_repo, relative: str) -> None:
+    root, base, m2c = m2c_repo
+    with (root / relative).open("a", encoding="utf-8") as handle:
+        handle.write("- out of scope\n")
+    assert upstream_scope_problems(root, base, m2c, whole_file_edits=M2C_WHOLE_FILE_EDITS) == [
+        f"upstream file changed beyond its version line: {relative}"]
+
+
+def test_m2c_still_allows_version_line_edits_elsewhere(m2c_repo) -> None:
+    root, base, m2c = m2c_repo
+    (root / "plugin.json").write_text('{\n  "name": "x",\n  "version": "2.3.1-kit.4"\n}\n')
+    assert upstream_scope_problems(root, base, m2c, whole_file_edits=M2C_WHOLE_FILE_EDITS) == []
+
+
+def test_m2b_range_ends_at_the_m2c_start_and_ignores_later_changes(m2c_repo) -> None:
+    root, base, m2c = m2c_repo
+    (root / "skills" / "blog-write" / "SKILL.md").write_text("# rewritten after M2c started\n")
+    _git(root, "commit", "-q", "-am", "m2c work")
+    (root / "plugin.json").write_text('{\n  "name": "changed in the working tree"\n}\n')
+    assert upstream_scope_problems(root, base, base, until=m2c) == []
+    assert upstream_scope_problems(root, base, m2c, whole_file_edits=M2C_WHOLE_FILE_EDITS) == [
+        "upstream file changed beyond its version line: plugin.json",
+        "upstream file changed beyond its version line: skills/blog-write/SKILL.md",
+    ]
+
+
+def test_m2b_range_still_catches_edits_made_before_the_m2c_start(m2c_repo) -> None:
+    root, base, m2c = m2c_repo
+    (root / "skills" / "blog-write" / "SKILL.md").write_text("# rewritten during M2b\n")
+    _git(root, "commit", "-q", "-am", "m2b work")
+    m2c_later = _git(root, "rev-parse", "HEAD").strip()
+    assert upstream_scope_problems(root, base, m2c, until=m2c_later) == [
+        "upstream file changed beyond its version line: skills/blog-write/SKILL.md"]
+
+
+def _fork_commits(*patterns: re.Pattern[str]) -> list[str]:
     text = (ROOT / "FORK.md").read_text(encoding="utf-8")
-    base, start = BASE_RE.search(text), M2B_BASE_RE.search(text)
-    assert base and start, "FORK.md has no upstream base or M2b start commit line"
-    for commit in (base.group(1), start.group(1)):
+    commits = []
+    for pattern in patterns:
+        found = pattern.search(text)
+        assert found, f"FORK.md has no line matching {pattern.pattern}"
+        commits.append(found.group(1))
+    for commit in commits:
         probe = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{commit}^{{commit}}"],
                                capture_output=True, check=False)
         if probe.returncode != 0:
             pytest.skip(f"commit {commit} is not in this clone")
-    assert upstream_scope_problems(ROOT, base.group(1), start.group(1)) == []
+    return commits
+
+
+def test_m2b_changes_upstream_files_only_in_version_surfaces_changelog_and_developer_docs() -> None:
+    base, m2b, m2c = _fork_commits(BASE_RE, M2B_BASE_RE, M2C_BASE_RE)
+    assert upstream_scope_problems(ROOT, base, m2b, until=m2c) == []
+
+
+def test_m2c_changes_upstream_files_only_in_version_surfaces_and_its_six_paths() -> None:
+    base, m2c = _fork_commits(BASE_RE, M2C_BASE_RE)
+    assert upstream_scope_problems(ROOT, base, m2c, whole_file_edits=M2C_WHOLE_FILE_EDITS) == []
