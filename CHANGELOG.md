@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 이 절은 포크(blog-kit) 릴리스 기록이다. 업스트림 기준 커밋과 포크 변경 목록은 [`FORK.md`](FORK.md)에 있다. 아래 `[Unreleased]`부터는 업스트림 기록 그대로다.
 
+### [2.3.1-kit.4] - 2026-10-31
+
+#### Added
+
+- 파이프라인 최소판(M2c). 라우터 밖 독립 명령 `/blog-memo`(요약 메모 양식, 전제 지식 점검), `/blog-interview`(인터뷰·스틸맨, 리서치, decision-record 초안과 공개본 변환, 한국어 검수, Codex 교차 검토), `/blog-learn`(학습 확인, 원칙·카드 제안). 한국어 검수 에이전트 `blog-reviewer-ko`(P0 네 종류, 점수 없음)와 decision-record 템플릿.
+- 엔진 명령 `memo-check`(메모 기밀 검사를 메모·검사기 버전·금칙어 목록 digest에 묶어 기록), `record-review`·`record-learning`(검수·학습 결과를 엔진이 검사·집계해 발행 증거에 기록하고 그때의 입력 digest에 묶음), `cross-review`(금칙어 검사를 통과한 공개본만 Codex에 읽기 전용으로), `accept-proposal`(사람이 digest로 승인한 제안만 원칙·카드로). 글별 상태 파일 `inbox/<slug>/state.md`.
+- 맥락 로더 `scripts/load_blogkit_context.py`: 허용된 비공개 맥락만 금칙어 검사 뒤 업스트림과 같은 펜스로 내보내고, 메모는 검사 통과 기록이 있을 때만 내보낸다. 사용 순서와 프로필 예시는 `docs/BLOG-KIT-PIPELINE.md`.
+- 이 경로는 업스트림 전달 계약(blog_preflight, 리뷰 nonce, 90점)과 분석기 점수를 쓰지 않는다. 발행 조건은 발행 게이트 1~6이 맡는다(`FORK.md`).
+
 ### [2.3.1-kit.3] - 2026-10-28
 
 #### Added

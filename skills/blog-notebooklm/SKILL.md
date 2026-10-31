@@ -13,7 +13,7 @@ argument-hint: "[ask|discover|library|setup|status|cleanup] [question-or-url]"
 license: MIT
 metadata:
   author: AgriciDaniel
-  version: "2.3.1-kit.3"
+  version: "2.3.1-kit.4"
   source: "https://github.com/PleasePrompto/notebooklm-skill"
 ---
 

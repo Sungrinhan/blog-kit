@@ -38,7 +38,7 @@ UPSTREAM_PINNED_INSTALL_SH = (
 )
 # Fork distribution values.
 PUBLIC_REPOSITORY = "https://github.com/Sungrinhan/blog-kit"
-PUBLIC_VERSION = "2.3.1-kit.3"
+PUBLIC_VERSION = "2.3.1-kit.4"
 PUBLIC_PLUGIN_IDENTIFIER = "claude-blog"
 PUBLIC_OWNER = "Sungrinhan"
 PUBLIC_MARKETPLACE = "blog-kit"
