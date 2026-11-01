@@ -10,7 +10,7 @@ E="<installPath>/adapters/astro/blogkit.py"
 
 ## 1. 사용 순서
 
-1. **`/blog-memo <slug>`** (첫 실행): `inbox/<slug>/memo.md`가 없을 때만 질문형 빈 양식을 만든다. 메모는 AI 세션 밖에서 직접 쓴다.
+1. **`/blog-memo <slug>`** (첫 실행): `inbox/<slug>/memo.md`가 없을 때만 질문형 빈 양식을 만든다. 회사 글감 메모는 AI 세션 밖에서 직접 쓴다. 회사 정보가 없는 글감은 요청하면 AI 초안을 받아 고친다.
 2. **`memo-check`** (사람, 터미널): 메모의 기밀 검사 통과를 상태 파일에 기록한다. 휴리스틱 경고가 있으면 출력의 `warnings_digest`로 확인한다. 메모를 고치면 다시 돌린다.
 
    ```bash
