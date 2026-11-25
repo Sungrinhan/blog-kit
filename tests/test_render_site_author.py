@@ -90,7 +90,9 @@ def test_hero_image_has_high_fetch_priority(tmp_path):
 @pytest.mark.parametrize(
     "value",
     ["example.com/notes", "ftp://example.com/", "https://", "https://user@example.com/",
-     "https://user:pw@example.com/", "javascript:alert(1)", "/relative/path"],
+     "https://user:pw@example.com/", "javascript:alert(1)", "/relative/path",
+     "http://example.com:abc/", "http://example.com:99999/", "https://exa mple.com/",
+     "https://evil.example\\.a.example/"],
 )
 def test_bad_urls_fail_the_render(tmp_path, key, value):
     result = render(tmp_path, BODY, slug="bad", extra_frontmatter=f"{key}: {value}\n")
@@ -104,6 +106,23 @@ def test_site_url_refuses_query_and_fragment(tmp_path, value):
     result = render(tmp_path, BODY, slug="bad", extra_frontmatter=f"site_url: {value}\n")
     assert result.returncode != 0
     assert "query or fragment" in result.stderr
+
+
+@pytest.mark.parametrize("line", ["site_url:", 'site_url: ""', "author_url:", "author_url: ''"])
+def test_a_set_but_empty_url_key_fails_the_render(tmp_path, line):
+    result = render(tmp_path, BODY, slug="bad", extra_frontmatter=line + "\n")
+    assert result.returncode != 0
+    assert "is set but empty" in result.stderr
+
+
+def test_single_string_same_as_is_one_item(tmp_path):
+    page = render_page(tmp_path, BODY, slug="one", extra_frontmatter=f"author_same_as: {SAME_AS[0]}\n")
+    assert _blogposting(page)["author"]["sameAs"] == [SAME_AS[0]]
+
+
+def test_ipv6_host_and_port_are_accepted(tmp_path):
+    page = render_page(tmp_path, BODY, slug="v6", extra_frontmatter="site_url: http://[::1]:8080/notes/\n")
+    assert _footer_href(page) == "http://[::1]:8080/notes/"
 
 
 def test_author_url_may_carry_a_query(tmp_path):
