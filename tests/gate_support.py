@@ -2,7 +2,7 @@
 
 `golden_draft` copies tests/fixtures/golden_draft (a draft that passes the
 strict gates), appends frontmatter lines and markdown, renders it through the
-real renderer and adds a minimal PDF, so a test can run Gate 3 or Gate 5 on
+real renderer CLI (no PDF engine) and adds a minimal PDF, so a test can run Gate 3 or Gate 5 on
 it. `offline_probes` is a fixture: import it into a test module to give every
 test no network and a private review-state directory (an import, not
 tests/conftest.py, because that file is upstream and the fork does not edit
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def load_script(name: str, filename: str):
 
 
 PREFLIGHT = load_script("wr_gate_preflight", "blog_preflight.py")
-RENDERER = load_script("wr_gate_renderer", "blog_render.py")
+RENDER_CLI = ROOT / "scripts" / "blog_render.py"
 
 
 @pytest.fixture(autouse=True)
@@ -58,11 +59,17 @@ def require_browser() -> None:
             pytest.skip("requires matching installed Chromium; no browser download in unit tests")
 
 
-def golden_draft(tmp_path: Path, frontmatter: str = "", markdown: str = "") -> Path:
-    """Render the golden draft with extra frontmatter lines and markdown."""
+def golden_draft(
+    tmp_path: Path, frontmatter: str = "", markdown: str = "", fixture: Path = FIXTURE, slug: str = SLUG,
+) -> Path:
+    """Render a fixture draft (the golden draft by default) with extra
+    frontmatter lines and markdown. A fixture without its own hero gets the
+    golden draft's hero.webp."""
     draft = tmp_path / "draft"
-    shutil.copytree(FIXTURE, draft)
-    source = draft / f"{SLUG}.md"
+    shutil.copytree(fixture, draft)
+    if not (draft / "hero.webp").exists():
+        shutil.copy2(FIXTURE / "hero.webp", draft / "hero.webp")
+    source = draft / f"{slug}.md"
     text = source.read_bytes().decode("utf-8")
     if frontmatter:
         head, sep, rest = text.partition("\n---\n")
@@ -70,6 +77,16 @@ def golden_draft(tmp_path: Path, frontmatter: str = "", markdown: str = "") -> P
     if markdown:
         text += "\n" + markdown + "\n"
     source.write_bytes(text.encode("utf-8"))
-    RENDERER._render_html(source, draft, "hero.webp")
-    (draft / f"{SLUG}.pdf").write_bytes(MINIMAL_PDF)
+    result = subprocess.run(
+        [sys.executable, str(RENDER_CLI), "--md", str(source), "--out-dir", str(draft), "--pdf-engine", "none"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stderr
+    (draft / f"{slug}.pdf").write_bytes(MINIMAL_PDF)
     return draft
+
+
+def page_viewports(result: dict) -> dict:
+    """Gate 3's per-viewport page results; the desktop-dark entry holds only
+    background colors and has no `result`."""
+    return {name: entry["result"] for name, entry in result["per_viewport"].items() if "result" in entry}
