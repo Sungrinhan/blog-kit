@@ -16,8 +16,8 @@ lines, except for a fixed set of exact paths per milestone range:
   skills/blog/SKILL.md (fork skill sentence) and tests/test_skill_frontmatter.py
   (count expectations).
 - WR (Windows render fixes), from its start commit to the working tree: the
-  upstream files that milestone patches on purpose (CHANGELOG.md included,
-  for the kit.5 entry), listed in WR_WHOLE_FILE_EDITS and in FORK.md's
+  upstream files that milestone patches on purpose (CHANGELOG.md and CITATION.cff's
+  release date included, for kit.5), listed in WR_WHOLE_FILE_EDITS and in FORK.md's
   fork-edit list.
 A clone without a recorded commit skips that range's check.
 
@@ -52,6 +52,7 @@ M2C_WHOLE_FILE_EDITS = frozenset({
 WR_WHOLE_FILE_EDITS = frozenset({
     ".github/workflows/ci.yml",
     "CHANGELOG.md",
+    "CITATION.cff",
     "scripts/blog_preflight.py",
     "scripts/blog_render.py",
     "scripts/load_untrusted_root.py",

@@ -76,7 +76,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `.github/SECURITY.md`: 보안 제보(Security Advisory) URL을 포크 저장소로
 - `.github/workflows/ci.yml`: windows-latest에서 `tests/windows/pytest-targets.txt`의 테스트 파일만 도는 `windows-tests` 작업(Python 3.12, PDF 엔진·브라우저 없음, `@파일` 인자 때문에 pytest 8.2 이상을 따로 설치). 다른 작업은 그대로
 - `CHANGELOG.md`: 맨 위에 포크 절과 포크 릴리스 항목
-- `CITATION.cff`: 버전 `2.3.1-kit.N`, 저장소를 포크로
+- `CITATION.cff`: 버전 `2.3.1-kit.N`, 저장소를 포크로, 출시일(`date-released`)을 포크 릴리스 날짜로
 - `LICENSE`: 업스트림 저작권 줄 아래 포크 저작권 줄
 - `README.md`: 맨 위 포크 설치 안내 블록(절차서 링크 포함). 나머지 본문은 업스트림 그대로
 - `pyproject.toml`: 버전 `2.3.1+kit.N`(PEP 440 로컬 버전), 프로젝트 URL을 포크로
