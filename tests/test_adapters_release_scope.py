@@ -51,6 +51,7 @@ M2C_WHOLE_FILE_EDITS = frozenset({
 WR_WHOLE_FILE_EDITS = frozenset({
     ".github/workflows/ci.yml",
     "scripts/blog_render.py",
+    "skills/blog-chart/scripts/generate_chart_svg.py",
     "tests/test_dependency_ci_workflow.py",
 })
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+[-+]kit\.\d+")

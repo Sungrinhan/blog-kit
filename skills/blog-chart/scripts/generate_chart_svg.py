@@ -20,6 +20,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -563,6 +564,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def write_stdout_utf8(text: str) -> None:
+    """Write chart content to stdout as UTF-8 with LF, whatever the console encoding (fork)."""
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        sys.stdout.write(text)
+        return
+    sys.stdout.flush()
+    buffer.write(text.encode("utf-8"))
+    buffer.flush()
+
+
 def emit(data: dict, as_json: bool) -> None:
     """Print JSON or a concise human status."""
     if as_json:
@@ -571,7 +583,7 @@ def emit(data: dict, as_json: bool) -> None:
         if data.get("output"):
             print(f"Wrote {data['output']}")
         else:
-            print(data.get("content", ""))
+            write_stdout_utf8(data.get("content", "") + "\n")
     else:
         print(f"Error: {data.get('error', 'Unknown error')}", file=sys.stderr)
 
@@ -583,8 +595,72 @@ def output_display_path(output_arg: str, output_path: Path, root: Path) -> str:
     return output_arg
 
 
+def dir_fd_writes_supported() -> bool:
+    """Return True when open, replace and unlink all accept dir_fd (fork).
+
+    os.replace uses renameat like os.rename, but CPython registers only
+    os.rename in os.supports_dir_fd, so rename stands in for replace.
+    """
+    return all(func in os.supports_dir_fd for func in (os.open, os.rename, os.unlink))
+
+
+def is_link_stat(st: os.stat_result) -> bool:
+    """Return True for a symlink or a Windows reparse point (fork)."""
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & reparse)
+
+
+def check_parent_unchanged(parent: Path, expected: os.stat_result, moment: str) -> None:
+    """Fail unless parent is still the same real directory (fork)."""
+    current = os.lstat(parent)
+    if (
+        is_link_stat(current)
+        or not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino)
+    ):
+        raise ChartError(f"Output directory changed {moment} replace: {parent}")
+
+
+def write_text_atomic_by_identity(path: Path, text: str) -> None:
+    """Atomically write text where dir_fd is unavailable, e.g. Windows (fork).
+
+    The parent must be a real directory (no symlink or reparse point); its
+    lstat device/inode is checked again right before and right after the
+    replace. The temp file is created exclusively in the same directory and
+    removed on any failure before the replace.
+    """
+    parent = path.parent
+    before = os.lstat(parent)
+    if is_link_stat(before) or not stat.S_ISDIR(before.st_mode):
+        raise ChartError(f"Refusing symlink output directory: {parent}")
+    tmp_path = parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        file_flags |= os.O_NOFOLLOW
+    fd = os.open(tmp_path, file_flags, 0o600)
+    tmp_created = True
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        check_parent_unchanged(parent, before, "before")
+        os.replace(tmp_path, path)
+        tmp_created = False
+        check_parent_unchanged(parent, before, "after")
+    finally:
+        if tmp_created:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 def write_text_atomic_no_follow(path: Path, text: str) -> None:
     """Atomically write text without following a final-path symlink."""
+    if not dir_fd_writes_supported():
+        write_text_atomic_by_identity(path, text)
+        return
     dir_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         dir_flags |= os.O_DIRECTORY
@@ -638,7 +714,7 @@ def main(argv: list[str] | None = None) -> int:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if output_path.exists() and output_path.is_symlink():
                 raise ChartError(f"Refusing symlink output: {output_path}")
-            write_text_atomic_no_follow(output_path, markup + os.linesep)
+            write_text_atomic_no_follow(output_path, markup + "\n")
             result["output"] = output_display_path(args.output, output_path, root)
         else:
             result["content"] = markup

@@ -1,2 +1,3 @@
 tests/test_windows_runner_capability.py
 tests/test_render_windows_read.py
+tests/test_chart_windows_write.py
