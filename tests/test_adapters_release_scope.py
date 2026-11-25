@@ -50,6 +50,7 @@ M2C_WHOLE_FILE_EDITS = frozenset({
 # Each WR ticket adds the upstream files it patches here and to FORK.md.
 WR_WHOLE_FILE_EDITS = frozenset({
     ".github/workflows/ci.yml",
+    "scripts/blog_render.py",
     "tests/test_dependency_ci_workflow.py",
 })
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+[-+]kit\.\d+")
