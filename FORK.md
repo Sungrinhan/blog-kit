@@ -26,7 +26,9 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `adapters/astro/blogkit_links.py`: 발행 게이트 6이 쓸 외부 링크 검사 모듈(stdlib). 설치본의 업스트림 `scripts/blog_preflight.py`(수정 없음)의 URL 형식·해석된 주소 전부 공개·연결 대상 고정·프록시 없음·자동 리다이렉트 금지·시간 제한·1바이트 읽기를 그대로 쓰고, 그 위에 자격 증명 URL 거부, 홉마다 같은 검사를 하는 리다이렉트 최대 5홉, 403·405의 HEAD 뒤 범위 GET, 결과 구분(ok, 403·405를 업스트림 형식 `external-links.allowed`에 정확히 적힌 URL만 allowed, mailto는 요청 없이 skipped, 차단은 정책 거부·영구 오류·일시 오류), 일시 오류(시간 초과·연결·DNS 실패·429·5xx)만 재시도 2회 뒤 경고를 더한다. 예외 목록 파일은 symlink 거부·64KB·UTF-8, 잘못된 항목은 줄 번호와 함께 거부. 잘못된 URL·리졸버 예외·예상 못 한 예외는 정책 거부로 끝나고, 결과는 URL을 SHA-256 앞 16자리로만 가리킨다
 - `tests/test_blogkit_links.py`: S3. 가짜 resolver(`socket.getaddrinfo` 대체)·opener로 홉별 검증·최종 404·410, 사설·메타데이터·loopback 주소와 그쪽 리다이렉트, 자격 증명, 5홉 경계, 일시 오류 재시도와 회복, 정책·영구 오류 재시도 없음, 403·405 예외 목록, mailto, 잘못된 URL, 예외 목록 파일 규칙, 결과에 URL 원문 없음 확인. 네트워크 없음
 - `tests/fixtures/blogkit/hash-vectors.json`: 내용 해시 골든 벡터. 한 번 생성해 고정한 값이라, 바뀌면 이미 발행한 글의 해시가 바뀐다는 뜻
-- `tests/test_adapters_release_scope.py`: 업스트림 릴리스 검사기가 보지 않는 `adapters/`에 같은 금지 문자열·설치 스크립트 링크 검사를 적용하고, 업스트림 파일 변경 범위를 마일스톤 구간별로 확인한다. M2b 구간(M2b 시작 커밋 → M2c 시작 커밋)은 버전 줄·`CHANGELOG.md`·개발자 문서(`CLAUDE.md`)만, M2c 구간(M2c 시작 커밋 → 작업 트리)은 버전 줄과 정확한 경로 여섯 개(`.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `CLAUDE.md`, `CHANGELOG.md`, `skills/blog/SKILL.md`, `tests/test_skill_frontmatter.py`)만 허용한다. 임시 git 레포로 허용·거부 사례와 M2b 구간이 M2c 이후 변경에 영향받지 않음을 확인(기록된 커밋이 없는 clone은 그 구간을 건너뜀)
+- `tests/test_adapters_release_scope.py`: 업스트림 릴리스 검사기가 보지 않는 `adapters/`에 같은 금지 문자열·설치 스크립트 링크 검사를 적용하고, 업스트림 파일 변경 범위를 마일스톤 구간별로 확인한다. M2b 구간(M2b 시작 커밋 → M2c 시작 커밋)은 버전 줄·`CHANGELOG.md`·개발자 문서(`CLAUDE.md`)만, M2c 구간(M2c 시작 커밋 → WR 시작 커밋)은 버전 줄과 정확한 경로 여섯 개(`.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `CLAUDE.md`, `CHANGELOG.md`, `skills/blog/SKILL.md`, `tests/test_skill_frontmatter.py`)만, WR 구간(WR 시작 커밋 → 작업 트리)은 버전 줄과 Windows 렌더 수정이 일부러 고치는 업스트림 파일(`WR_WHOLE_FILE_EDITS`, 아래 "포크 수정" 목록과 같은 이유)만 허용한다. 임시 git 레포로 허용·거부 사례와 M2b 구간이 M2c 이후 변경에 영향받지 않음을 확인(기록된 커밋이 없는 clone은 그 구간을 건너뜀)
+- `tests/test_windows_runner_capability.py`: Windows CI 기반. 러너가 파일 심볼릭 링크를 만들 수 있는지(로컬은 권한이 없으면 사유와 함께 skip, `CI`가 있으면 실패), `lstat`·`fstat`이 0이 아닌 같은 장치·inode를 주는지, Windows 대상 목록의 각 줄이 실제 테스트 파일인지 확인
+- `tests/windows/pytest-targets.txt`: Windows CI 작업(`windows-tests`)과 로컬 Windows에서 도는 테스트 파일 목록. pytest `@파일` 인자로 읽으므로 한 줄에 경로 하나, 주석 없음(`python -m pytest -v -rs @tests/windows/pytest-targets.txt`)
 - `scripts/confidential_check.py`: 기밀 검사(stdlib). 금칙어 목록은 기기별 `~/.config/blog-kit/confidential.txt` 하나(경로 옵션·환경 변수 없음, symlink 거부, 일반 파일, 256KB, UTF-8 strict, `#` 줄·빈 줄 무시, 유효 항목 0개면 차단). `list`는 목록 상태만, `scan`은 파일 목록 또는 `--slug`(공개본 글과 자산 폴더, 경로·slug 규칙은 설치본 검증기에서)를 루트 안에서만(symlink 구성 요소 거부) 읽는다. md(1MB)·svg(10MB)는 NFC+casefold 부분 문자열 일치로 차단, 바이너리 이미지는 건너뛰고 목록만, 그 밖의 형식·읽기·디코딩 실패·예외는 검사 불능으로 차단. 휴리스틱(사설 IP·내부 호스트 접미사·이메일·이슈 키·로컬 경로·단위 붙은 숫자)은 경고만, 긴 줄에서도 선형 시간. 출력은 분류·파일·줄 번호뿐이고 금칙어·일치 원문·예외 메시지는 내지 않는다. 다른 모듈이 설치 경로에서 불러 쓰는 공통 함수: `scan_text(data, terms)`는 호출자가 이미 읽고 텍스트로 정한 바이트(엄격한 UTF-8)나 문자열을 확장자와 상관없이 검사해 금칙어 일치(차단)와 휴리스틱 경고를 분류·줄 번호로만 돌려준다(`scan`도 파일마다 이 함수를 쓴다). `terms_digest(terms)`·`list_digest()`는 정규화한 단어(NFC, casefold, 중복 제거, 정렬)를 줄바꿈으로 이은 바이트의 SHA-256 16진수 64자이고, 주석·빈 줄·순서·대소문자만 다르면 같다. 목록이 없거나 비면 digest 대신 차단
 - `tests/test_confidential_check.py`: 임시 HOME의 가짜 금칙어로 목록 상태·일치·휴리스틱·검사 불능·slug와 파일 목록 동등·예외·긴 줄 시간 확인, 모든 출력에 가짜 금칙어·원문 없음
 - `tests/test_confidential_text.py`: 기밀 검사 공통 함수를 모듈로 불러 확인. 임시 HOME의 가짜 금칙어로 `scan_text`의 분류·줄 번호 결과(md 밖 json·yaml 바이트 포함, NFD 입력, UTF-8 아닌 바이트 차단), 결과에 가짜 금칙어·원문 없음, 크기 상한(1MB) 긴 한 줄의 시간 제한, 목록 digest의 동등(주석·빈 줄·순서·대소문자·중복)·차이(단어 변경·삭제·추가)·없거나 빈 목록 차단
@@ -57,6 +59,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `.claude-plugin/plugin.json`: 버전 `2.3.1-kit.N`, repository·homepage를 포크 저장소로, 설명의 스킬 폴더 수를 36개("incl. 4 fork skills", 400자 미만 제한 때문에 이름은 마켓 목록·`CLAUDE.md`에)로, 에이전트 수를 6개로. 이름·author는 업스트림 그대로
 - `.github/ISSUE_TEMPLATE/config.yml`: 토론·보안 제보·문서 안내 URL을 포크 저장소로
 - `.github/SECURITY.md`: 보안 제보(Security Advisory) URL을 포크 저장소로
+- `.github/workflows/ci.yml`: windows-latest에서 `tests/windows/pytest-targets.txt`의 테스트 파일만 도는 `windows-tests` 작업(Python 3.12, PDF 엔진·브라우저 없음). 다른 작업은 그대로
 - `CHANGELOG.md`: 맨 위에 포크 절과 포크 릴리스 항목
 - `CITATION.cff`: 버전 `2.3.1-kit.N`, 저장소를 포크로
 - `LICENSE`: 업스트림 저작권 줄 아래 포크 저작권 줄
@@ -79,6 +82,7 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `tests/test_skill_frontmatter.py`: 스킬 폴더 수 단언을 업스트림 32개 + `blog-doctor`·`blog-memo`·`blog-interview`·`blog-learn` = 36개(user-invocable 35개)로, 에이전트 수 단언을 업스트림 5개 + `blog-reviewer-ko` = 6개로
 - `tests/test_scripts_wave3_image.py`: 기존 전역 설정 테스트를 `~/.claude.json` 기대값과 새 함수 인자로. 임시 HOME·설치본 흉내로 대상 선택 사례(대상 없음·경로·전역·둘 다·자동 탐색 실패·성공, `--project`)를 설정·확인·제거와 설정 확인 스크립트에 대해 확인
 - `tests/test_release_safeguards.py`: 검사기 픽스처를 포크 값으로, 마켓 이름 단언을 `blog-kit`으로. 업스트림 보안 checkout 안내 필수 테스트를 포크 보안 URL·설치 스크립트 제외·author 유지 테스트로 교체
+- `tests/test_dependency_ci_workflow.py`: `windows-tests` 작업이 windows-latest에서 대상 목록을 돌고 브라우저를 설치하지 않는지 확인하는 구조 테스트 하나
 - `tests/test_version_coherence.py`: 버전 표면 비교를 대응 규칙으로(`2.3.1-kit.N` ↔ `2.3.1+kit.N`, 접미사 없는 형식도 수용), 기준 버전을 plugin.json으로, 임시 폴더 픽스처로 일치·불일치 확인
 - `uv.lock`: 패키지 버전 변경에 따른 재생성(`claude-blog` `2.3.1+kit.N`)
 
@@ -153,6 +157,12 @@ M2c 시작 커밋: `1d1fcfe6bf7a2ae9f5d8c5d5604f1c6f7a463c7a` (이 커밋 이후
 - **사람 검증 대기**: 사람 작업 티켓 #45(`v2.3.1-kit.4` 태그와 push, 블로그 레포 ref 고정, 두 기기 업그레이드·설치 점검, 실제 주제로 승인 직전까지 실행과 단계별 시간 기록, kit.3 다운그레이드 확인과 kit.4 복귀)가 열려 있다.
 - **검증 완료**: 두 기기 모두 실제 실행에서 `status`의 빠진 것이 `approval_missing` 하나이고, 단계별 시간과 다운그레이드·복귀 결과가 사람 작업 티켓에 있다. 판정은 M2a·M2b 사람 작업 티켓(#9, #27)으로 검증된 ref 위에서 한다.
 - M2c 동안 실제 글은 승인 직전(`draft: true`)에서 멈추는 것이 정상이다. 승인과 발행 흐름의 변경, 실제 발행은 M4다. 블로그 레포는 kit.4를 고정하기 전까지 설치 신원이 맞지 않아 엔진 명령이 거부되고, 검증기 사본은 확정된 엔진 커밋의 정본을 바이트 그대로 복사한다(M2b와 같은 방식).
+
+## Windows 렌더 수정(WR) 상태
+
+WR 시작 커밋: `ed7830f02cf18b1f280ef9558835207a2754e215` (이 커밋 이후 업스트림 파일 변경 범위를 `tests/test_adapters_release_scope.py`가 확인하고, M2c 구간은 이 커밋에서 끝난다)
+
+- Windows에서 업스트림 렌더·전달 게이트를 우회 없이 돌리고 렌더러 버그를 고치는 작업(이슈 #46). M2와 달리 업스트림 파일을 일부러 고치므로, 고치는 파일마다 위 "포크 수정" 목록과 범위 테스트의 `WR_WHOLE_FILE_EDITS`에 같은 커밋에서 더한다.
 
 ## 업스트림 전달 계약과 점수 게이트를 잇지 않는 이유
 
