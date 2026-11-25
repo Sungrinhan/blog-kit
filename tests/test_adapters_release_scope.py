@@ -11,9 +11,13 @@ Milestones add their features without patching upstream. An upstream file
 lines, except for a fixed set of exact paths per milestone range:
 - M2b, from its start commit to the M2c start commit (both recorded in
   FORK.md): CHANGELOG.md and the developer document CLAUDE.md.
-- M2c, from its start commit to the working tree: the plugin and marketplace
-  manifests, CLAUDE.md, CHANGELOG.md, the router skills/blog/SKILL.md (fork
-  skill sentence) and tests/test_skill_frontmatter.py (count expectations).
+- M2c, from its start commit to the WR start commit: the plugin and
+  marketplace manifests, CLAUDE.md, CHANGELOG.md, the router
+  skills/blog/SKILL.md (fork skill sentence) and tests/test_skill_frontmatter.py
+  (count expectations).
+- WR (Windows render fixes), from its start commit to the working tree: the
+  upstream files that milestone patches on purpose, listed in
+  WR_WHOLE_FILE_EDITS and in FORK.md's fork-edit list.
 A clone without a recorded commit skips that range's check.
 
 Stdlib + pytest only. No network: fixtures are local temp git repos.
@@ -33,6 +37,7 @@ ADAPTERS = ROOT / "adapters"
 BASE_RE = re.compile(r"업스트림 기준 커밋: `([0-9a-f]{40})`")
 M2B_BASE_RE = re.compile(r"M2b 시작 커밋: `([0-9a-f]{40})`")
 M2C_BASE_RE = re.compile(r"M2c 시작 커밋: `([0-9a-f]{40})`")
+WR_BASE_RE = re.compile(r"WR 시작 커밋: `([0-9a-f]{40})`")
 WHOLE_FILE_EDITS = frozenset({"CHANGELOG.md", "CLAUDE.md"})
 M2C_WHOLE_FILE_EDITS = frozenset({
     ".claude-plugin/plugin.json",
@@ -41,6 +46,11 @@ M2C_WHOLE_FILE_EDITS = frozenset({
     "CHANGELOG.md",
     "skills/blog/SKILL.md",
     "tests/test_skill_frontmatter.py",
+})
+# Each WR ticket adds the upstream files it patches here and to FORK.md.
+WR_WHOLE_FILE_EDITS = frozenset({
+    ".github/workflows/ci.yml",
+    "tests/test_dependency_ci_workflow.py",
 })
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+[-+]kit\.\d+")
 
@@ -251,5 +261,10 @@ def test_m2b_changes_upstream_files_only_in_version_surfaces_changelog_and_devel
 
 
 def test_m2c_changes_upstream_files_only_in_version_surfaces_and_its_six_paths() -> None:
-    base, m2c = _fork_commits(BASE_RE, M2C_BASE_RE)
-    assert upstream_scope_problems(ROOT, base, m2c, whole_file_edits=M2C_WHOLE_FILE_EDITS) == []
+    base, m2c, wr = _fork_commits(BASE_RE, M2C_BASE_RE, WR_BASE_RE)
+    assert upstream_scope_problems(ROOT, base, m2c, until=wr, whole_file_edits=M2C_WHOLE_FILE_EDITS) == []
+
+
+def test_wr_changes_upstream_files_only_in_version_surfaces_and_its_listed_paths() -> None:
+    base, wr = _fork_commits(BASE_RE, WR_BASE_RE)
+    assert upstream_scope_problems(ROOT, base, wr, whole_file_edits=WR_WHOLE_FILE_EDITS) == []

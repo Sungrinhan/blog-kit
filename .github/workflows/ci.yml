@@ -62,6 +62,35 @@ jobs:
       - name: Run adjudicated secret scan
         run: python3 scripts/check_secrets.py
 
+  windows-tests:
+    # Fork: regression tests for Windows-specific code paths (renderer file
+    # reads, chart file writes, root context loader). Only the files listed in
+    # tests/windows/pytest-targets.txt run here, one path per line, read by
+    # pytest's @file argument (pytest 8.2+). No PDF engine or browser: Gate 3
+    # browser checks stay in the ubuntu `test` job. GitHub sets CI=true, so the
+    # symlink tests fail instead of skipping when the runner cannot make links.
+    # Run the same list locally with
+    #   python -m pytest -v -rs @tests/windows/pytest-targets.txt
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, SHA-pinned
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0, SHA-pinned
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Windows target tests
+        run: python -m pytest -v -rs "@tests/windows/pytest-targets.txt"
+
   dependency-smoke:
     # Validate the exact hash-locked optional runtimes without API calls,
     # secrets, a browser download, or a browser launch.

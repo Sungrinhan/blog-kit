@@ -64,6 +64,14 @@ def test_test_job_installs_the_browser_and_requires_it():
     assert job["steps"][run]["env"]["CLAUDE_BLOG_REQUIRE_BROWSER"] == "1"
 
 
+def test_windows_job_runs_the_target_list_on_windows():
+    job = CI["jobs"]["windows-tests"]
+    assert job["runs-on"] == "windows-latest"
+    runs = [step.get("run", "") for step in job["steps"]]
+    assert any("@tests/windows/pytest-targets.txt" in cmd and "pytest" in cmd for cmd in runs)
+    assert not any("patchright install" in cmd for cmd in runs)
+
+
 def test_test_matrix_covers_current_pythons():
     versions = CI["jobs"]["test"]["strategy"]["matrix"]["python-version"]
     assert {"3.11", "3.12", "3.13", "3.14"} <= set(versions)
