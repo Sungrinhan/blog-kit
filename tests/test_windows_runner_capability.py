@@ -17,18 +17,10 @@ import stat
 from pathlib import Path
 
 import pytest
+from windows_support import make_symlink
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGETS = ROOT / "tests" / "windows" / "pytest-targets.txt"
-
-
-def _make_symlink(target: Path, link: Path) -> None:
-    try:
-        os.symlink(target, link)
-    except (OSError, NotImplementedError) as exc:
-        if os.environ.get("CI"):
-            pytest.fail(f"CI runner cannot create symlinks: {exc!r}")
-        pytest.skip(f"no symlink privilege on this machine: {exc!r}")
 
 
 def test_runner_creates_file_symlink(tmp_path):
@@ -36,7 +28,7 @@ def test_runner_creates_file_symlink(tmp_path):
     target.write_text("body", encoding="utf-8")
     link = tmp_path / "link.md"
 
-    _make_symlink(target, link)
+    make_symlink(target, link)
 
     assert stat.S_ISLNK(os.lstat(link).st_mode)
     assert link.is_symlink()
