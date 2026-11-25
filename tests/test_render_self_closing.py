@@ -1,0 +1,125 @@
+"""WR-05: self-closing tags in the body stay closed elements after rendering.
+
+The body sanitizer used to emit `<line .../>` as a bare `<line ...>`, so every
+sibling after it nested inside the line and Gate 3 failed on the chart
+(PAIN-POINTS 6). A self-closing tag now goes through start-tag then end-tag
+handling: a non-void tag comes out as `<tag ...></tag>`, a void tag (`br`,
+`hr`, `img`) without a closing tag, and `<table/>` gets the scroll wrapper like
+any table.
+
+Tests render a real markdown file through the CLI and check the HTML body.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from html.parser import HTMLParser
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "blog_render.py"
+FRONTMATTER = (
+    "---\ntitle: Self Closing Post\ndescription: A short description of the post.\n"
+    "date: 2026-11-25\nauthor: Alex Rivera\ncanonical: https://example.com/blog/self-closing/\n"
+    "slug: self-closing\n---\n"
+)
+START = "<!--bs-body:start-->"
+END = "<!--bs-body:end-->"
+VOID = {"br", "hr", "img"}
+
+
+def _render_body(tmp_path: Path, body: str) -> str:
+    source = tmp_path / "self-closing.md"
+    source.write_bytes((FRONTMATTER + body).encode("utf-8"))
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--md", str(source), "--out-dir", str(tmp_path), "--pdf-engine", "none"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stderr
+    page = (tmp_path / "self-closing.html").read_text(encoding="utf-8")
+    return page[page.index(START) + len(START):page.rindex(END)]
+
+
+class _Tree(HTMLParser):
+    """Record each element's parent tag, as a browser-like parser nests them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stack: list[str] = []
+        self.parents: list[tuple[str, str | None, dict]] = []
+
+    def handle_starttag(self, tag, attrs):
+        self.parents.append((tag, self.stack[-1] if self.stack else None, dict(attrs)))
+        if tag not in VOID:
+            self.stack.append(tag)
+
+    def handle_startendtag(self, tag, attrs):  # pragma: no cover - output has none
+        raise AssertionError(f"self-closing tag left in output: {tag}")
+
+    def handle_endtag(self, tag):
+        assert self.stack and self.stack[-1] == tag, f"unbalanced </{tag}> in {self.stack}"
+        self.stack.pop()
+
+
+def _tree(html: str) -> _Tree:
+    tree = _Tree()
+    tree.feed(html)
+    tree.close()
+    assert tree.stack == [], f"unclosed elements: {tree.stack}"
+    return tree
+
+
+def test_consecutive_svg_self_closing_siblings_do_not_nest(tmp_path: Path):
+    svg = (
+        '<svg viewBox="0 0 100 50" role="img" aria-label="Chart">'
+        '<line x1="0" y1="10" x2="100" y2="10" stroke="#ccc"/>'
+        '<line x1="0" y1="20" x2="100" y2="20" stroke="#ccc"/>'
+        '<rect x="0" y="30" width="40" height="10" fill="#0f766e"/>'
+        '<circle cx="80" cy="35" r="4" fill="#0f766e"/>'
+        '<text x="50" y="48" fill="currentColor">42 ms</text>'
+        "</svg>"
+    )
+    body = _render_body(tmp_path, f"<figure>\n{svg}\n</figure>\n\nAfter the chart.\n")
+    assert '<line x1="0" y1="10" x2="100" y2="10" stroke="#ccc"></line>' in body
+    assert '<rect x="0" y="30" width="40" height="10" fill="#0f766e"></rect>' in body
+    parents = {(tag, parent) for tag, parent, _ in _tree(body).parents}
+    for child in ("line", "rect", "circle", "text"):
+        assert (child, "svg") in parents, child
+    assert not any(parent in {"line", "rect", "circle"} for _, parent, _ in _tree(body).parents)
+    assert "<p>After the chart.</p>" in body
+
+
+def test_html_self_closing_div_is_closed(tmp_path: Path):
+    body = _render_body(tmp_path, '<div class="spacer"/>\n<p>Next paragraph.</p>\n')
+    assert '<div class="spacer"></div>' in body
+    tree = _tree(body)
+    assert ("p", None) in {(tag, parent) for tag, parent, _ in tree.parents}
+
+
+def test_void_tags_have_no_closing_tag(tmp_path: Path):
+    body = _render_body(
+        tmp_path,
+        '<p>Line one<br/>line two</p>\n\n<hr/>\n\n<p><img src="https://example.com/a.png" alt="A"/></p>\n',
+    )
+    for tag in VOID:
+        assert f"<{tag}" in body, tag
+        assert f"</{tag}>" not in body, tag
+    _tree(body)
+
+
+def test_self_closing_table_gets_scroll_wrapper(tmp_path: Path):
+    body = _render_body(tmp_path, "<table/>\n\n<p>After.</p>\n")
+    assert re.search(
+        r'<div class="table-wrap" role="region" aria-label="Table" tabindex="0"><table></table></div>',
+        body,
+    ), body
+    _tree(body)
+
+
+def test_self_closing_dropped_tags_leave_no_trace(tmp_path: Path):
+    body = _render_body(tmp_path, '<p>Before<script src="x.js"/> middle<style/> after</p>\n')
+    assert "<script" not in body and "<style" not in body
+    assert "Before" in body and "middle" in body and "after" in body
+    _tree(body)

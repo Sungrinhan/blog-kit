@@ -284,11 +284,11 @@ class _BodySanitizer(HTMLParser):
         self.out.append(f"<{tag}{attr_text}>")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag = tag.lower()
-        if self.drop_depth or tag not in ALLOWED_TAGS:
-            return
-        attr_text = self._clean_attrs(tag, attrs)
-        self.out.append(f"<{tag}{attr_text}>")
+        # Fork (WR-05): a self-closing tag is a start tag followed by its end
+        # tag, so `<line/>` stays a closed element (later siblings no longer
+        # nest inside it), void tags get no end tag, and `<table/>` is wrapped.
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()

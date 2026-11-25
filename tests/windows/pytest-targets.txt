@@ -2,3 +2,4 @@ tests/test_windows_runner_capability.py
 tests/test_render_windows_read.py
 tests/test_chart_windows_write.py
 tests/test_load_untrusted_root_relative.py
+tests/test_render_self_closing.py
