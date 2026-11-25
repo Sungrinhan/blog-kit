@@ -101,7 +101,7 @@ produce. The markdown file stem is the artifact stem (`S.html`, `S.pdf`) unless
 | `site_name` | Optional | Footer and `og:site_name`; derived from the canonical host when absent |
 | `lang` | Optional (default `en`) | `<html lang>`, JSON-LD `inLanguage` |
 | `og_image_alt` | Recommended | `alt` of the hero image and `og:image:alt` (defaults to the title) |
-| `tags` | Optional list | JSON-LD `keywords`, the kicker |
+| `tags` | Optional list: block list or inline array (`["a", "b"]` or `[a, b]`; an empty, non-string or quoted-but-not-JSON item fails the render) | JSON-LD `keywords`, the kicker |
 | `kicker` | Optional | Label above the title |
 
 `canonical` is the article's final public URL: the site base URL plus the path.

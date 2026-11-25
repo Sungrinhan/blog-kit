@@ -15,7 +15,9 @@ Output names: <slug> is the frontmatter `slug` when present, otherwise the
 file stem of --md (so D/image-formats.md renders D/image-formats.html and .pdf,
 and Gate 2 finds one matching set). The name is lowercased and hyphenated.
 
-Frontmatter keys read (flat `key: value` lines; `tags` may be a list):
+Frontmatter keys read (flat `key: value` lines; `tags` may be a block list or
+an inline array, `tags: ["a", "b"]` or `tags: [a, b]`; an inline array with
+an empty or non-string item, or one that is neither form, fails the render):
   required: title, description, date, author
   optional: slug (output name), canonical (full https URL: sets the canonical
     link, og:url, the og:image and JSON-LD image URLs, the default site name
@@ -389,10 +391,52 @@ def _parse_frontmatter(raw: str) -> tuple[dict, str]:
             if not value:
                 current_list_key = key
                 fm[key] = []
+            elif key in INLINE_LIST_KEYS and value.startswith("[") and value.endswith("]"):
+                current_list_key = None
+                fm[key] = _parse_inline_list(key, value)
             else:
                 current_list_key = None
                 fm[key] = value.strip('"').strip("'")
     return fm, body
+
+
+# Fork (WR-08): list-valued keys that also accept an inline array
+# (`tags: ["a", "b"]` or `tags: [a, b]`). Other keys keep a bracketed value as
+# a plain string.
+INLINE_LIST_KEYS = frozenset({"tags", "author_same_as"})
+
+
+def _parse_inline_list(key: str, value: str) -> list[str]:
+    """Read an inline array: a JSON string array first, else simple items.
+
+    Simple items are split on commas and may not contain quotes or commas.
+    An empty item, a non-string item, or a value neither form reads is an
+    error, so a malformed array never renders as a literal string.
+    """
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        inner = value[1:-1]
+        if not inner.strip():
+            return []
+        parsed = [item.strip() for item in inner.split(",")]
+        if any('"' in item or "'" in item for item in parsed):
+            raise ValueError(
+                f"frontmatter {key}: inline array {value!r} is neither a JSON string array "
+                f"nor simple comma-separated items without quotes"
+            )
+    if not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"frontmatter {key}: inline array items must be strings: {value!r}")
+    if any(not item.strip() for item in parsed):
+        raise ValueError(f"frontmatter {key}: inline array has an empty item: {value!r}")
+    return [item.strip() for item in parsed]
+
+
+# Fork (WR-08): the members of python-markdown's `extra` minus `attr_list`,
+# which ate trailing `{...}` text in table cells and headings as attributes.
+MARKDOWN_EXTENSIONS = [
+    "abbr", "def_list", "fenced_code", "footnotes", "md_in_html", "tables", "sane_lists",
+]
 
 
 def _markdown_to_html(body: str) -> str:
@@ -401,7 +445,7 @@ def _markdown_to_html(body: str) -> str:
     emphasis, lists, blockquotes, hr, images)."""
     try:
         import markdown  # type: ignore
-        return _sanitize_body_html(markdown.markdown(body, extensions=["extra", "sane_lists"]))
+        return _sanitize_body_html(markdown.markdown(body, extensions=MARKDOWN_EXTENSIONS))
     except ImportError:
         return _sanitize_body_html(_stdlib_markdown(body))
 
