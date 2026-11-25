@@ -214,6 +214,9 @@ lastUpdated: "YYYY-MM-DD"
 ---
 ```
 
+`tags` may be the inline array above (a JSON string array, or `[a, b]` with
+unquoted items) or a block list of `  - item` lines; an empty item, or quoting
+that is not valid JSON such as `['a', 'b']`, fails the render.
 `title`, `description`, `date` and `author` are required by the renderer. `canonical`
 is required in practice: Gate 5 checks it and relative image URLs resolve against
 it. The orchestrator fills it from the project's site URL (the `BRAND.md` site URL,
