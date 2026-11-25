@@ -96,22 +96,40 @@ ALLOWED_TAGS = frozenset({
     "svg", "g", "path", "rect", "circle", "line", "polyline", "polygon",
     "text", "tspan", "title", "desc",
 })
-GLOBAL_ATTRS = frozenset({"class", "id", "role", "aria-label"})
+# Fork (WR-06): the aria-* names let a chart keep its accessible name
+# (aria-labelledby on <svg>) and hide decoration from screen readers.
+GLOBAL_ATTRS = frozenset({
+    "class", "id", "role", "aria-label",
+    "aria-labelledby", "aria-describedby", "aria-hidden",
+})
 ALLOWED_ATTRS = {
     "a": frozenset({"href", "title", "rel", "target"}),
     "img": frozenset({"src", "alt", "title", "width", "height", "loading", "decoding"}),
     "svg": frozenset({"viewbox", "width", "height", "xmlns", "fill", "stroke"}),
-    "path": frozenset({"d", "fill", "stroke", "stroke-width"}),
+    # Fork (WR-06): opacity, font-weight, stroke-linecap and stroke-linejoin
+    # are the presentation attributes the chart generator's seven types emit
+    # beyond the upstream list (grid-line opacity, bold value labels, line
+    # joins). Their values pass _svg_value_is_safe like fill and stroke.
+    "path": frozenset({"d", "fill", "stroke", "stroke-width", "opacity"}),
     "rect": frozenset({"x", "y", "width", "height", "rx", "ry", "fill", "stroke"}),
     "circle": frozenset({"cx", "cy", "r", "fill", "stroke"}),
-    "line": frozenset({"x1", "x2", "y1", "y2", "stroke", "stroke-width"}),
-    "polyline": frozenset({"points", "fill", "stroke", "stroke-width"}),
-    "polygon": frozenset({"points", "fill", "stroke", "stroke-width"}),
-    "text": frozenset({"x", "y", "fill", "font-size", "text-anchor"}),
+    "line": frozenset({"x1", "x2", "y1", "y2", "stroke", "stroke-width", "opacity"}),
+    "polyline": frozenset({
+        "points", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+    }),
+    "polygon": frozenset({"points", "fill", "stroke", "stroke-width", "opacity"}),
+    "text": frozenset({"x", "y", "fill", "font-size", "text-anchor", "font-weight", "opacity"}),
     "tspan": frozenset({"x", "y", "dx", "dy", "fill", "font-size"}),
     "td": frozenset({"colspan", "rowspan"}),
     "th": frozenset({"colspan", "rowspan", "scope"}),
 }
+# Fork (WR-06): every SVG presentation attribute the allowlist admits. Their
+# values are checked by _svg_value_is_safe before they are kept.
+SVG_PRESENTATION_ATTRS = frozenset({
+    "fill", "stroke", "stroke-width", "opacity", "font-size", "font-weight",
+    "text-anchor", "stroke-linecap", "stroke-linejoin",
+})
+_UNSAFE_SVG_VALUE_PARTS = ("javascript:", "url(", "expression(", "<", "\\")
 
 # The renderer wraps the converted and sanitized markdown body in these comment
 # markers and records the sha256 of the UTF-8 bytes strictly between them in
@@ -242,6 +260,17 @@ def _safe_attr(value: object) -> str:
     return html_lib.escape(str(value), quote=True)
 
 
+def _svg_value_is_safe(value: str) -> bool:
+    """Fork (WR-06): reject a presentation value that could run or fetch code.
+
+    HTMLParser has already decoded the attribute's entities once; decoding
+    again catches a double-encoded value. Case and whitespace/control
+    characters are then dropped before matching.
+    """
+    folded = re.sub(r"[\s\x00-\x1f\x7f]+", "", html_lib.unescape(value)).lower()
+    return not any(part in folded for part in _UNSAFE_SVG_VALUE_PARTS)
+
+
 class _BodySanitizer(HTMLParser):
     """Small allowlist sanitizer for markdown-rendered body HTML."""
 
@@ -262,6 +291,8 @@ class _BodySanitizer(HTMLParser):
                 continue
             value = raw_value.strip()
             if name in {"href", "src"} and not _is_safe_url(value, media=(name == "src")):
+                continue
+            if name in SVG_PRESENTATION_ATTRS and not _svg_value_is_safe(value):
                 continue
             clean.append(f'{name}="{_safe_attr(value)}"')
         return (" " + " ".join(clean)) if clean else ""
