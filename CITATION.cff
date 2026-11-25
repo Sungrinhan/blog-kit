@@ -12,7 +12,7 @@ repository-code: "https://github.com/Sungrinhan/blog-kit"
 url: "https://claude-blog.md"
 license: MIT
 version: 2.3.1-kit.5
-date-released: "2026-10-13"
+date-released: "2026-11-25"
 keywords:
   - claude-code
   - blog
