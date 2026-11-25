@@ -594,7 +594,8 @@ def _json_for_script(data: dict) -> str:
 def _build_breadcrumb_json_ld(fm: dict) -> str:
     """Fork (WR-10): a second JSON-LD block, site then post, only with site_url.
 
-    Without a canonical the post item has no `item` URL.
+    The site item is named like the publisher (site_name, else the site_url
+    host). Without a canonical the post item has no `item` URL.
     """
     if not fm.get("site_url"):
         return ""
