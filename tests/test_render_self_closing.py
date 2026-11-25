@@ -12,7 +12,6 @@ Tests render a real markdown file through the CLI and check the HTML body.
 
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from html.parser import HTMLParser
@@ -48,14 +47,14 @@ class _Tree(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.stack: list[str] = []
-        self.parents: list[tuple[str, str | None, dict]] = []
+        self.parents: set[tuple[str, str | None]] = set()
 
     def handle_starttag(self, tag, attrs):
-        self.parents.append((tag, self.stack[-1] if self.stack else None, dict(attrs)))
+        self.parents.add((tag, self.stack[-1] if self.stack else None))
         if tag not in VOID:
             self.stack.append(tag)
 
-    def handle_startendtag(self, tag, attrs):  # pragma: no cover - output has none
+    def handle_startendtag(self, tag, attrs):
         raise AssertionError(f"self-closing tag left in output: {tag}")
 
     def handle_endtag(self, tag):
@@ -84,18 +83,17 @@ def test_consecutive_svg_self_closing_siblings_do_not_nest(tmp_path: Path):
     body = _render_body(tmp_path, f"<figure>\n{svg}\n</figure>\n\nAfter the chart.\n")
     assert '<line x1="0" y1="10" x2="100" y2="10" stroke="#ccc"></line>' in body
     assert '<rect x="0" y="30" width="40" height="10" fill="#0f766e"></rect>' in body
-    parents = {(tag, parent) for tag, parent, _ in _tree(body).parents}
+    parents = _tree(body).parents
     for child in ("line", "rect", "circle", "text"):
         assert (child, "svg") in parents, child
-    assert not any(parent in {"line", "rect", "circle"} for _, parent, _ in _tree(body).parents)
+    assert not any(parent in {"line", "rect", "circle"} for _, parent in parents)
     assert "<p>After the chart.</p>" in body
 
 
 def test_html_self_closing_div_is_closed(tmp_path: Path):
     body = _render_body(tmp_path, '<div class="spacer"/>\n<p>Next paragraph.</p>\n')
     assert '<div class="spacer"></div>' in body
-    tree = _tree(body)
-    assert ("p", None) in {(tag, parent) for tag, parent, _ in tree.parents}
+    assert ("p", None) in _tree(body).parents
 
 
 def test_void_tags_have_no_closing_tag(tmp_path: Path):
@@ -111,10 +109,8 @@ def test_void_tags_have_no_closing_tag(tmp_path: Path):
 
 def test_self_closing_table_gets_scroll_wrapper(tmp_path: Path):
     body = _render_body(tmp_path, "<table/>\n\n<p>After.</p>\n")
-    assert re.search(
-        r'<div class="table-wrap" role="region" aria-label="Table" tabindex="0"><table></table></div>',
-        body,
-    ), body
+    wrapped = '<div class="table-wrap" role="region" aria-label="Table" tabindex="0"><table></table></div>'
+    assert wrapped in body, body
     _tree(body)
 
 
@@ -122,4 +118,17 @@ def test_self_closing_dropped_tags_leave_no_trace(tmp_path: Path):
     body = _render_body(tmp_path, '<p>Before<script src="x.js"/> middle<style/> after</p>\n')
     assert "<script" not in body and "<style" not in body
     assert "Before" in body and "middle" in body and "after" in body
+    _tree(body)
+
+
+def test_self_closing_inside_dropped_content_keeps_drop_balanced(tmp_path: Path):
+    body = _render_body(
+        tmp_path,
+        "<p>Start<iframe/> one<object/> two</p>\n\n"
+        "<template><div/><script/>hidden</template>\n\nVisible after.\n",
+    )
+    assert "<iframe" not in body and "<object" not in body and "<template" not in body
+    assert "one" in body and "two" in body
+    assert "hidden" not in body
+    assert "<p>Visible after.</p>" in body
     _tree(body)
