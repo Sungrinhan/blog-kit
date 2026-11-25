@@ -51,6 +51,7 @@ M2C_WHOLE_FILE_EDITS = frozenset({
 WR_WHOLE_FILE_EDITS = frozenset({
     ".github/workflows/ci.yml",
     "scripts/blog_render.py",
+    "scripts/load_untrusted_root.py",
     "skills/blog-chart/scripts/generate_chart_svg.py",
     "tests/test_dependency_ci_workflow.py",
 })
