@@ -27,6 +27,13 @@ from urllib.parse import urlparse
 
 WIDTH = 560
 HEIGHT = 380
+# Fork (WR-07): muted text (subtitle, source line, donut total) is marked with
+# the chart-muted class and keeps a light fill attribute, instead of a CSS
+# variable set by an inline style. The renderer's page CSS gives the class its
+# light and dark colors (it strips <style> and style= from the body); the
+# <style> below does the same for consumers that keep it.
+MUTED_LIGHT = "#4b5563"
+MUTED_DARK = "#d1d5db"
 PALETTE = ["#f97316", "#38bdf8", "#a78bfa", "#22c55e", "#facc15", "#fb7185"]
 TYPE_ALIASES = {
     "bar": "horizontal_bar",
@@ -346,7 +353,7 @@ def render_donut(config: dict) -> str:
         rows.append(f'<path d="{donut_path(cx, cy, outer, inner, angle, end)}" fill="{PALETTE[index % len(PALETTE)]}" />')
         angle = end
     rows.append(f'<text x="{cx}" y="{cy - 3}" text-anchor="middle" font-size="22" font-weight="800" fill="currentColor">{total:g}</text>')
-    rows.append(f'<text x="{cx}" y="{cy + 16}" text-anchor="middle" font-size="10" fill="var(--chart-muted, currentColor)">total</text>')
+    rows.append(f'<text x="{cx}" y="{cy + 16}" text-anchor="middle" font-size="10" class="chart-muted" fill="{MUTED_LIGHT}">total</text>')
     for index, item in enumerate(data):
         y = 105 + index * 28
         rows.append(f'<rect x="360" y="{y - 9}" width="11" height="11" fill="{PALETTE[index % len(PALETTE)]}" />')
@@ -445,7 +452,7 @@ def render_figure(config: dict, output_format: str = "html") -> str:
     body = render_chart_body(chart_type, config)
     subtitle_svg = ""
     if subtitle:
-        subtitle_svg = text_block(subtitle, WIDTH / 2, 48, 70, "middle", 13, 'font-size="12" fill="var(--chart-muted, currentColor)"')
+        subtitle_svg = text_block(subtitle, WIDTH / 2, 48, 70, "middle", 13, f'font-size="12" class="chart-muted" fill="{MUTED_LIGHT}"')
     figcaption = f'Source: <a href="{esc(source_href)}">{esc(source_label)}</a>'
     if not source_href:
         figcaption = f"Source: {esc(source_label)}"
@@ -453,9 +460,9 @@ def render_figure(config: dict, output_format: str = "html") -> str:
         figcaption += f", {esc(source_date)}"
     figcaption += "."
     svg = f'''<figure class="blog-chart">
-<svg viewBox="0 0 {WIDTH} {HEIGHT}" style="max-width: 100%; height: auto; font-family: 'Inter', system-ui, sans-serif; --chart-muted: #4b5563;" role="img" aria-labelledby="{esc(title_id)} {esc(desc_id)}">
+<svg viewBox="0 0 {WIDTH} {HEIGHT}" style="max-width: 100%; height: auto; font-family: 'Inter', system-ui, sans-serif;" role="img" aria-labelledby="{esc(title_id)} {esc(desc_id)}">
   <style>
-    @media (prefers-color-scheme: dark) {{ svg {{ --chart-muted: #d1d5db; }} }}
+    @media (prefers-color-scheme: dark) {{ .chart-muted {{ fill: {MUTED_DARK}; }} }}
     @media (prefers-reduced-motion: reduce) {{ * {{ animation: none !important; transition: none !important; }} }}
   </style>
   <title id="{esc(title_id)}">{esc(title)}</title>
@@ -463,7 +470,7 @@ def render_figure(config: dict, output_format: str = "html") -> str:
   <text x="{WIDTH / 2:.1f}" y="29" text-anchor="middle" font-size="18" font-weight="800" fill="currentColor">{esc(title)}</text>
   {subtitle_svg}
   {body}
-  <text x="{WIDTH / 2:.1f}" y="366" text-anchor="middle" font-size="10" fill="var(--chart-muted, currentColor)">{esc(source_text)}</text>
+  <text x="{WIDTH / 2:.1f}" y="366" text-anchor="middle" font-size="10" class="chart-muted" fill="{MUTED_LIGHT}">{esc(source_text)}</text>
 </svg>
 <figcaption>{figcaption}</figcaption>
 </figure>'''

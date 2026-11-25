@@ -298,8 +298,8 @@ Text elements:     fill="currentColor"
 Grid lines:        stroke="currentColor" opacity="0.08"
 Axis lines:        stroke="currentColor" opacity="0.3"
 Background:        transparent (no fill on root SVG)
-Subtitle text:     fill="var(--chart-muted, currentColor)"
-Source text:        fill="var(--chart-muted, currentColor)"
+Subtitle text:     class="chart-muted" fill="#4b5563"
+Source text:        class="chart-muted" fill="#4b5563"
 Label text:         fill="currentColor" opacity="0.8"
 ```
 

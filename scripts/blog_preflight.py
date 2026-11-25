@@ -1502,7 +1502,8 @@ def gate_3_visual_verification(draft_dir: Path, slug: str | None = None) -> dict
   // Text in the article that is in the DOM but not rendered (keyword stuffing).
   // Skips inert containers, closed <details> content and decorative SVG, and
   // trusts only non-geometric signals inside scrollers (a wide table scrolls).
-  const hiddenTextSkip = 'template,noscript,script,style,svg[aria-hidden="true"],[aria-hidden="true"] svg';
+  // Fork (WR-07): an SVG's <title>/<desc> is its accessible name, never drawn.
+  const hiddenTextSkip = 'template,noscript,script,style,svg[aria-hidden="true"],[aria-hidden="true"] svg,svg title,svg desc';
   const hiddenElements = new Map();
   const articleRoot = document.querySelector('article') || document.body;
   const hiddenWalker = document.createTreeWalker(articleRoot, NodeFilter.SHOW_TEXT);

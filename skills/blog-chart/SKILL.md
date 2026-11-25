@@ -85,13 +85,15 @@ Text elements:     fill="currentColor"
 Grid lines:        stroke="currentColor" opacity="0.08"
 Axis lines:        stroke="currentColor" opacity="0.3"
 Background:        transparent (no fill on root SVG)
-Subtitle text:     fill="var(--chart-muted, currentColor)"
-Source text:        fill="var(--chart-muted, currentColor)"
+Subtitle text:     class="chart-muted" fill="#4b5563"
+Source text:        class="chart-muted" fill="#4b5563"
 Label text:        fill="currentColor" opacity="0.8"
 ```
 
-Set `--chart-muted` to an accessible text token in the host theme. If no token
-exists, use `#4b5563` on light backgrounds and `#d1d5db` on dark backgrounds.
+Muted text carries the `chart-muted` class and a light `fill`. The host page
+CSS colors the class: `#4b5563` on light backgrounds and `#d1d5db` in dark mode
+(the bundled renderer's page CSS already does, because it strips `<style>` and
+`style=` from the post body). Do not use a CSS variable set by an inline style.
 Do not rely on low-opacity source or subtitle text for visible attribution.
 
 ### Color Palette
@@ -125,7 +127,7 @@ shapes, or legend text so colorblind readers can distinguish series.
   <!-- Chart content. With more than one chart on a page, give each its own ids,
        for example chart-1-title / chart-1-desc and chart-2-title / chart-2-desc. -->
 
-  <text x="280" y="372" text-anchor="middle" font-size="10" fill="var(--chart-muted, currentColor)">
+  <text x="280" y="372" text-anchor="middle" font-size="10" class="chart-muted" fill="#4b5563">
     Source: Source Name (Year)
   </text>
 </svg>
@@ -145,7 +147,7 @@ shapes, or legend text so colorblind readers can distinguish series.
 
   {/* Chart content */}
 
-  <text x="280" y="372" textAnchor="middle" fontSize="10" fill="var(--chart-muted, currentColor)">
+  <text x="280" y="372" textAnchor="middle" fontSize="10" className="chart-muted" fill="#4b5563">
     Source: Source Name (Year)
   </text>
 </svg>
@@ -259,7 +261,7 @@ Wrap every chart in a `<figure>` element:
     <title id="chart-title">[Chart Title]</title>
     <desc id="chart-desc">[Full description with data points for screen readers]</desc>
     <!-- chart content -->
-    <text x="280" y="372" text-anchor="middle" font-size="10" fill="var(--chart-muted, currentColor)">
+    <text x="280" y="372" text-anchor="middle" font-size="10" class="chart-muted" fill="#4b5563">
       Source: [Source Name] ([Year])
     </text>
   </svg>
@@ -274,7 +276,7 @@ Wrap every chart in a `<figure>` element:
     <title id="chart-title">[Chart Title]</title>
     <desc id="chart-desc">[Full description]</desc>
     {/* chart content with camelCase attributes */}
-    <text x="280" y="372" textAnchor="middle" fontSize="10" fill="var(--chart-muted, currentColor)">
+    <text x="280" y="372" textAnchor="middle" fontSize="10" className="chart-muted" fill="#4b5563">
       Source: [Source Name] ([Year])
     </text>
   </svg>
