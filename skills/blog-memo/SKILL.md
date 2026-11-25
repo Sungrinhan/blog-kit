@@ -6,7 +6,7 @@ user-invocable: true
 license: MIT
 metadata:
   author: Sungrinhan
-  version: "2.3.1-kit.4"
+  version: "2.3.1-kit.5"
 ---
 
 # Blog Memo

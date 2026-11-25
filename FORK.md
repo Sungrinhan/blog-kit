@@ -188,6 +188,7 @@ M2c 시작 커밋: `1d1fcfe6bf7a2ae9f5d8c5d5604f1c6f7a463c7a` (이 커밋 이후
 WR 시작 커밋: `ed7830f02cf18b1f280ef9558835207a2754e215` (이 커밋 이후 업스트림 파일 변경 범위를 `tests/test_adapters_release_scope.py`가 확인하고, M2c 구간은 이 커밋에서 끝난다)
 
 - Windows에서 업스트림 렌더·전달 게이트를 우회 없이 돌리고 렌더러 버그를 고치는 작업(이슈 #46). M2와 달리 업스트림 파일을 일부러 고치므로, 고치는 파일마다 위 "포크 수정" 목록과 범위 테스트의 `WR_WHOLE_FILE_EDITS`에 같은 커밋에서 더한다.
+- **구현 완료(`2.3.1-kit.5`)**: Windows CI 작업(`windows-tests`)이 `tests/windows/pytest-targets.txt`의 회귀 테스트를 돌리고, ubuntu test 작업이 브라우저로 Gate 3 회귀(차트 접근성 텍스트, 수용 fixture)를 돌린다. 로컬 수용 확인: 시리즈 3편을 shim 없이 렌더해 Gate 1·2·3·5 통과, p99 차트는 생성기 출력 그대로에 손 값 라벨을 더해 값 라벨·연한 격자선·다크 모드 보조 색을 브라우저에서 확인. 확인 기록은 작업 폴더(`.scratch/windows-render-fixes/flow.md`)에 있다.
 
 ## 업스트림 전달 계약과 점수 게이트를 잇지 않는 이유
 

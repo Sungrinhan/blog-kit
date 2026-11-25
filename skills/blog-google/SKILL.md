@@ -15,7 +15,7 @@ argument-hint: "[setup|pagespeed|crux|crux-history|gsc|inspect|index|ga4|nlp|you
 license: MIT
 metadata:
   author: AgriciDaniel
-  version: "2.3.1-kit.4"
+  version: "2.3.1-kit.5"
   category: blog
 ---
 

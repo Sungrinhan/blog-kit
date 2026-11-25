@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 이 절은 포크(blog-kit) 릴리스 기록이다. 업스트림 기준 커밋과 포크 변경 목록은 [`FORK.md`](FORK.md)에 있다. 아래 `[Unreleased]`부터는 업스트림 기록 그대로다.
 
+### [2.3.1-kit.5] - 2026-11-25
+
+#### Fixed
+
+- Windows에서 렌더러·차트 생성기·루트 맥락 로더가 shim 없이 돈다(이슈 #46). 렌더러는 `os.O_NOFOLLOW`가 없으면 `lstat`·`fstat`·`lstat` 장치·inode 확인으로 심볼릭 링크와 바꿔치기를 거부하고, 차트 생성기는 `dir_fd`가 없으면 부모 폴더 ID 확인으로 원자적으로 쓰며 stdout을 UTF-8·LF로 낸다. 로더는 `--root`를 받으면 상대 경로를 그 폴더 기준으로 푼다.
+- 렌더러 sanitizer가 self-closing 태그(`<line/>` 등)를 닫힌 요소로 내고, 차트가 쓰는 표현·aria 속성을 남기며 표현 속성 값의 위험 패턴은 지운다. 차트 보조 글자는 `chart-muted` 클래스로 다크 모드 색을 받고, Gate 3은 SVG `<title>`·`<desc>`를 숨은 텍스트로 세지 않는다.
+- frontmatter `tags`·`author_same_as`의 인라인 배열을 읽고, `attr_list`를 빼서 표 셀·제목 끝 `{...}`가 글자로 남는다.
+
+#### Added
+
+- frontmatter `site_url`(하단 "Published at" 링크, `site_url`이 있을 때 JSON-LD publisher와 BreadcrumbList), `author_url`·`author_same_as`(JSON-LD author.url·sameAs). 표지 이미지에 `fetchpriority="high"`.
+- Windows CI 작업(`windows-tests`)과 WR 회귀 테스트, 수용 fixture(`tests/fixtures/wr_acceptance`).
+
 ### [2.3.1-kit.4] - 2026-10-31
 
 #### Added
