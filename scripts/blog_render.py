@@ -539,7 +539,7 @@ def _read_md_bytes_safely(path: Path) -> bytes:
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
-def _is_link_or_reparse_point(st) -> bool:
+def _is_link_or_reparse_point(st: os.stat_result) -> bool:
     attributes = getattr(st, "st_file_attributes", 0)
     return stat.S_ISLNK(st.st_mode) or bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
 
@@ -561,6 +561,8 @@ def _read_md_bytes_by_identity(path: Path) -> bytes:
         after = os.lstat(path)
         if _is_link_or_reparse_point(after):
             raise ValueError(refusal)
+        if not stat.S_ISREG(after.st_mode):
+            raise ValueError(f"not a regular file: {path}")
         identities = {(st.st_dev, st.st_ino) for st in (before, opened, after)}
         if len(identities) != 1:
             raise ValueError(f"{refusal} (file changed while opening)")

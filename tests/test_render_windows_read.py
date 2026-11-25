@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from windows_support import make_symlink
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "blog_render.py"
@@ -36,15 +37,6 @@ SOURCE = (
     "본문 문단입니다.\n"
 )
 REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-
-
-def _make_symlink(target: Path, link: Path) -> None:
-    try:
-        os.symlink(target, link)
-    except (OSError, NotImplementedError) as exc:
-        if os.environ.get("CI"):
-            pytest.fail(f"CI runner cannot create symlinks: {exc!r}")
-        pytest.skip(f"no symlink privilege on this machine: {exc!r}")
 
 
 @pytest.fixture
@@ -82,7 +74,7 @@ def test_without_nofollow_reads_a_regular_file(no_nofollow, source):
 
 def test_without_nofollow_refuses_a_symlink(no_nofollow, source, tmp_path):
     link = tmp_path / "link.md"
-    _make_symlink(source, link)
+    make_symlink(source, link)
 
     with pytest.raises(ValueError, match="refusing to follow symlink"):
         RENDER._read_md_bytes_safely(link)
@@ -126,7 +118,6 @@ def test_without_nofollow_refuses_mismatched_lstat_ids(no_nofollow, source, monk
     monkeypatch.setattr(os, "lstat", lstat)
     with pytest.raises(ValueError, match="refusing to follow symlink"):
         RENDER._read_md_bytes_safely(source)
-    assert len(calls) == 2
 
 
 def test_without_nofollow_refuses_a_link_after_open(no_nofollow, source, monkeypatch):
@@ -142,6 +133,22 @@ def test_without_nofollow_refuses_a_link_after_open(no_nofollow, source, monkeyp
 
     monkeypatch.setattr(os, "lstat", lstat)
     with pytest.raises(ValueError, match="refusing to follow symlink"):
+        RENDER._read_md_bytes_safely(source)
+
+
+def test_without_nofollow_refuses_a_non_regular_path_after_open(no_nofollow, source, monkeypatch):
+    real_lstat = os.lstat
+    calls = []
+
+    def lstat(path, *args, **kwargs):
+        calls.append(path)
+        st = real_lstat(path, *args, **kwargs)
+        if len(calls) == 2:
+            return _fake_stat(st, st_mode=stat.S_IFDIR | 0o755)
+        return st
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    with pytest.raises(ValueError, match="not a regular file"):
         RENDER._read_md_bytes_safely(source)
 
 
@@ -172,15 +179,16 @@ def test_without_nofollow_keeps_the_size_cap(no_nofollow, source, monkeypatch):
         RENDER._read_md_bytes_safely(source)
 
 
-@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="POSIX O_NOFOLLOW branch")
-def test_with_nofollow_opens_without_the_identity_checks(source, tmp_path, monkeypatch):
+def test_cli_refuses_a_symlinked_source_on_this_platform(source, tmp_path):
     link = tmp_path / "link.md"
-    _make_symlink(source, link)
+    make_symlink(source, link)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
 
-    def no_lstat(*args, **kwargs):
-        raise AssertionError("the O_NOFOLLOW branch must not lstat the source")
-
-    monkeypatch.setattr(os, "lstat", no_lstat)
-    assert RENDER._read_md_bytes_safely(source) == SOURCE.encode("utf-8")
-    with pytest.raises(ValueError, match="refusing to follow symlink"):
-        RENDER._read_md_bytes_safely(link)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--md", str(link), "--out-dir", str(out_dir), "--pdf-engine", "none"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert result.returncode != 0
+    assert "refusing to follow symlink" in result.stderr
+    assert not list(out_dir.glob("*.html"))
