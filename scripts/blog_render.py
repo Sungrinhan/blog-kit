@@ -21,7 +21,12 @@ an empty or non-string item, or one that is neither form, fails the render):
   required: title, description, date, author
   optional: slug (output name), canonical (full https URL: sets the canonical
     link, og:url, the og:image and JSON-LD image URLs, the default site name
-    and the footer site link), site_name (default: host of canonical),
+    and, without site_url, the footer site link), site_url (absolute http(s)
+    URL, no user info, query or fragment, trailing slash kept: the footer
+    "Published at" link), author_url (http(s) URL: JSON-LD author.url),
+    author_same_as (list of http(s) URLs, block or inline: JSON-LD
+    author.sameAs); a bad URL in any of these fails the render,
+    site_name (default: host of canonical),
     lang (default en), og_image_alt (default: title), kicker (default: first
     tag, else "Article"), tags (JSON-LD keywords), lastUpdated (alias
     dateModified; dateModified wins when both are set): an ISO date or
@@ -190,7 +195,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <p class="dek">{description_escaped}</p>
 <p class="byline"><strong>By {author_escaped}</strong> &middot; {published_human} &middot; {reading_time_min} min read &middot; {word_count} words</p>{updated_html}
 </header>
-<figure class="hero"><img src="{hero_filename}" alt="{og_image_alt_escaped}" width="1200" height="630"></figure>
+<figure class="hero"><img src="{hero_filename}" alt="{og_image_alt_escaped}" width="1200" height="630" fetchpriority="high"></figure>
 {body_html}
 <footer class="post-footer"><span>Published at <a href="{site_url_or_dash}" data-bs-generated="1">{site_name_escaped}</a></span><span>{published_human} &middot; {author_escaped}</span></footer>
 </article>
@@ -563,6 +568,17 @@ def _inline(text: str) -> str:
     return text
 
 
+def _author_json_ld(fm: dict) -> dict:
+    """Fork (WR-09): the Person, with url and sameAs when frontmatter sets them."""
+    author: dict = {"@type": "Person", "name": fm.get("author", "")}
+    if fm.get("author_url"):
+        author["url"] = str(fm["author_url"]).strip()
+    same_as = [str(item).strip() for item in _same_as_values(fm)]
+    if same_as:
+        author["sameAs"] = same_as
+    return author
+
+
 def _build_json_ld(fm: dict, word_count: int, og_image_url: str) -> str:
     data = {
         "@context": "https://schema.org",
@@ -572,7 +588,7 @@ def _build_json_ld(fm: dict, word_count: int, og_image_url: str) -> str:
         "image": og_image_url,
         "datePublished": fm.get("date", ""),
         "dateModified": _resolve_modified(fm) or fm.get("date", ""),
-        "author": {"@type": "Person", "name": fm.get("author", "")},
+        "author": _author_json_ld(fm),
         "wordCount": word_count,
         "keywords": ", ".join(fm.get("tags", [])) if isinstance(fm.get("tags"), list) else fm.get("tags", ""),
         "inLanguage": fm.get("lang", "en"),
@@ -817,11 +833,52 @@ def _validate_frontmatter(fm: dict, body: str) -> None:
             f"Required: {list(REQUIRED_FRONTMATTER_KEYS)}."
         )
     _resolve_modified(fm)
+    _validate_url_keys(fm)
     if not body.strip():
         raise ValueError(
             "markdown body is empty (after frontmatter). The renderer refuses "
             "to produce a content-less HTML shell."
         )
+
+
+def _check_http_url(key: str, value: object, site: bool = False) -> str:
+    """Fork (WR-09): an absolute http(s) URL with a hostname and no userinfo.
+
+    `site_url` also refuses a query and a fragment. A trailing slash is kept
+    as given. Anything else fails the render like other frontmatter errors.
+    """
+    text = str(value).strip()
+    try:
+        parts = urllib.parse.urlsplit(text)
+        hostname = parts.hostname
+    except ValueError:
+        hostname = None
+        parts = None
+    if parts is None or parts.scheme.lower() not in {"http", "https"} or not hostname:
+        raise ValueError(f"frontmatter {key} must be an absolute http(s) URL with a host: {text!r}")
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        raise ValueError(f"frontmatter {key} must not carry user info: {text!r}")
+    if site and (parts.query or parts.fragment or text.endswith(("?", "#"))):
+        raise ValueError(f"frontmatter {key} must not carry a query or fragment: {text!r}")
+    return text
+
+
+def _same_as_values(fm: dict) -> list[str]:
+    """`author_same_as` as a list: a block or inline list, or one string."""
+    value = fm.get("author_same_as")
+    if not value:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _validate_url_keys(fm: dict) -> None:
+    """Fork (WR-09): check the URL-valued keys before anything is written."""
+    if fm.get("site_url"):
+        _check_http_url("site_url", fm["site_url"], site=True)
+    if fm.get("author_url"):
+        _check_http_url("author_url", fm["author_url"])
+    for item in _same_as_values(fm):
+        _check_http_url("author_same_as", item)
 
 
 def _warn_if_stdlib_fallback_is_lossy(body: str) -> None:
@@ -886,7 +943,11 @@ def _render_html(md_path: Path, out_dir: Path, hero_filename: str) -> Path:
     canonical = fm.get("canonical", "")
     title = fm.get("title", md_path.stem)
     site_name = fm.get("site_name") or (canonical.split("/")[2] if canonical.startswith("http") else "")
-    site_url = "/".join(canonical.split("/")[:3]) if canonical.startswith("http") else ""
+    # Fork (WR-09): frontmatter site_url (validated) wins for the footer link,
+    # so a project page such as /dev-notes/ is not sent to the account root.
+    site_url = str(fm.get("site_url") or "").strip() or (
+        "/".join(canonical.split("/")[:3]) if canonical.startswith("http") else ""
+    )
     og_image = canonical.rstrip("/") + "/" + hero_filename if canonical else hero_filename
 
     rendered = HTML_TEMPLATE.format(

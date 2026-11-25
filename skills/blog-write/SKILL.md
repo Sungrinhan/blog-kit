@@ -207,6 +207,9 @@ author: "[Author name]"
 canonical: "[https://site.example/blog/post-slug/ , the final public URL]"
 slug: "[post-slug, optional; defaults to the .md file stem. If set, name the file <slug>.md]"
 site_name: "[Site name, optional; derived from the canonical host]"
+site_url: "[https://site.example/ , optional; the footer Published at link]"
+author_url: "[https://site.example/about/ , optional; JSON-LD author.url]"
+author_same_as: ["https://github.com/author", "https://www.linkedin.com/in/author"]
 lang: "en"
 og_image_alt: "[Descriptive sentence about the hero image]"
 tags: ["keyword1", "keyword2", "keyword3"]
