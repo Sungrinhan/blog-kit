@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 렌더러 sanitizer가 self-closing 태그(`<line/>` 등)를 닫힌 요소로 내고, 차트가 쓰는 표현·aria 속성을 남기며 표현 속성 값의 위험 패턴은 지운다. 차트 보조 글자는 `chart-muted` 클래스로 다크 모드 색을 받고, Gate 3은 SVG `<title>`·`<desc>`를 숨은 텍스트로 세지 않는다.
 - frontmatter `tags`·`author_same_as`의 인라인 배열을 읽고, `attr_list`를 빼서 표 셀·제목 끝 `{...}`가 글자로 남는다.
 
+#### Changed
+
+- 전에는 문자열로 통과하던 원고 일부가 이제 렌더 실패다. `tags`·`author_same_as`가 `[`로 시작하는데 `]`로 닫히지 않거나(뒤 주석 포함), 빈 항목·문자열 아닌 항목·JSON 아닌 따옴표(`['a', 'b']`)·대괄호 든 항목이 있을 때. `site_url`·`author_url`·`author_same_as`가 http(s) 절대 URL이 아니거나 user info·잘못된 포트·공백·백슬래시를 담거나, `site_url`·`author_url` 키가 값 없이 있을 때. `site_url`에 query·fragment가 있을 때.
+- `attr_list`를 뺐으므로 제목·문단 끝 `{#id}`·`{.class}` 같은 속성 표기는 더는 속성이 되지 않고 글자로 남는다.
+
 #### Added
 
 - frontmatter `site_url`(하단 "Published at" 링크, `site_url`이 있을 때 JSON-LD publisher와 BreadcrumbList), `author_url`·`author_same_as`(JSON-LD author.url·sameAs). 표지 이미지에 `fetchpriority="high"`.
