@@ -69,6 +69,8 @@ def test_windows_job_runs_the_target_list_on_windows():
     assert job["runs-on"] == "windows-latest"
     runs = [step.get("run", "") for step in job["steps"]]
     assert any("@tests/windows/pytest-targets.txt" in cmd and "pytest" in cmd for cmd in runs)
+    # The @file argument needs pytest 8.2+; the dev extra still allows 8.0.
+    assert any('"pytest>=8.2,<10.0"' in cmd for cmd in runs)
     assert not any("patchright install" in cmd for cmd in runs)
 
 
