@@ -20,10 +20,9 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-from windows_support import make_symlink
+from windows_support import REPARSE, fake_stat, make_symlink
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "blog_render.py"
@@ -36,7 +35,6 @@ SOURCE = (
     "date: 2026-11-25\nauthor: Alex Rivera\nslug: windows-read\n---\n\n"
     "본문 문단입니다.\n"
 )
-REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 @pytest.fixture
@@ -49,13 +47,6 @@ def source(tmp_path):
     path = tmp_path / "windows-read.md"
     path.write_bytes(SOURCE.encode("utf-8"))
     return path
-
-
-def _fake_stat(real, **changes):
-    fields = {name: getattr(real, name) for name in ("st_mode", "st_dev", "st_ino", "st_size")}
-    fields["st_file_attributes"] = getattr(real, "st_file_attributes", 0)
-    fields.update(changes)
-    return SimpleNamespace(**fields)
 
 
 def test_cli_renders_html_on_this_platform(source, tmp_path):
@@ -84,7 +75,7 @@ def test_without_nofollow_refuses_a_reparse_point(no_nofollow, source, monkeypat
     real_lstat = os.lstat
 
     def lstat(path, *args, **kwargs):
-        return _fake_stat(real_lstat(path), st_file_attributes=REPARSE)
+        return fake_stat(real_lstat(path), st_file_attributes=REPARSE)
 
     monkeypatch.setattr(os, "lstat", lstat)
     with pytest.raises(ValueError, match="refusing to follow symlink"):
@@ -113,7 +104,7 @@ def test_without_nofollow_refuses_mismatched_lstat_ids(no_nofollow, source, monk
     def lstat(path, *args, **kwargs):
         calls.append(path)
         st = real_lstat(path, *args, **kwargs)
-        return _fake_stat(st, st_ino=st.st_ino + 1) if len(calls) == call else st
+        return fake_stat(st, st_ino=st.st_ino + 1) if len(calls) == call else st
 
     monkeypatch.setattr(os, "lstat", lstat)
     with pytest.raises(ValueError, match="refusing to follow symlink"):
@@ -128,7 +119,7 @@ def test_without_nofollow_refuses_a_link_after_open(no_nofollow, source, monkeyp
         calls.append(path)
         st = real_lstat(path, *args, **kwargs)
         if len(calls) == 2:
-            return _fake_stat(st, st_mode=stat.S_IFLNK | 0o777)
+            return fake_stat(st, st_mode=stat.S_IFLNK | 0o777)
         return st
 
     monkeypatch.setattr(os, "lstat", lstat)
@@ -144,7 +135,7 @@ def test_without_nofollow_refuses_a_non_regular_path_after_open(no_nofollow, sou
         calls.append(path)
         st = real_lstat(path, *args, **kwargs)
         if len(calls) == 2:
-            return _fake_stat(st, st_mode=stat.S_IFDIR | 0o755)
+            return fake_stat(st, st_mode=stat.S_IFDIR | 0o755)
         return st
 
     monkeypatch.setattr(os, "lstat", lstat)
@@ -157,7 +148,7 @@ def test_without_nofollow_refuses_mismatched_fstat_id(no_nofollow, source, monke
 
     def fstat(fd):
         st = real_fstat(fd)
-        return _fake_stat(st, st_dev=st.st_dev + 1)
+        return fake_stat(st, st_dev=st.st_dev + 1)
 
     monkeypatch.setattr(os, "fstat", fstat)
     with pytest.raises(ValueError, match="refusing to follow symlink"):

@@ -22,10 +22,9 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-from windows_support import make_symlink
+from windows_support import REPARSE, fake_stat, make_symlink
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "skills" / "blog-chart" / "scripts" / "generate_chart_svg.py"
@@ -40,7 +39,6 @@ CONFIG = {
     "data": [{"label": "첫째", "value": 3}, {"label": "둘째", "value": 5}],
 }
 TEXT = f"<figure>{KOREAN}</figure>\n"
-REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 @pytest.fixture
@@ -52,13 +50,6 @@ def no_dir_fd(monkeypatch):
 def chart_root(tmp_path):
     (tmp_path / "chart.json").write_text(json.dumps(CONFIG, ensure_ascii=False), encoding="utf-8")
     return tmp_path
-
-
-def _fake_stat(real, **changes):
-    fields = {name: getattr(real, name) for name in ("st_mode", "st_dev", "st_ino")}
-    fields["st_file_attributes"] = getattr(real, "st_file_attributes", 0)
-    fields.update(changes)
-    return SimpleNamespace(**fields)
 
 
 def _leftovers(folder):
@@ -75,19 +66,24 @@ def _patch_parent_lstat(monkeypatch, parent, call, **changes):
         if Path(path) == parent:
             calls.append(path)
             if len(calls) == call:
-                return _fake_stat(st, **changes)
+                return fake_stat(st, **changes)
         return st
 
     monkeypatch.setattr(os, "lstat", lstat)
 
 
 @pytest.mark.parametrize("missing", ["open", "rename", "unlink"])
-def test_dir_fd_path_needs_open_rename_and_unlink(monkeypatch, missing):
+def test_one_missing_dir_fd_function_selects_the_identity_path(tmp_path, monkeypatch, missing):
+    # os.replace shares renameat with os.rename; CPython registers only rename.
+    # Only the identity path lstats the parent, so a reparse-point answer there
+    # shows which path ran.
     full = {os.open, os.rename, os.unlink}
     monkeypatch.setattr(os, "supports_dir_fd", full - {getattr(os, missing)})
-    assert CHART.dir_fd_writes_supported() is False
-    monkeypatch.setattr(os, "supports_dir_fd", full)
-    assert CHART.dir_fd_writes_supported() is True
+    _patch_parent_lstat(monkeypatch, tmp_path, 1, st_file_attributes=REPARSE)
+
+    with pytest.raises(CHART.ChartError, match="Refusing linked or non-directory output directory"):
+        CHART.write_text_atomic_no_follow(tmp_path / "chart.html", TEXT)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_without_dir_fd_writes_utf8_and_leaves_no_temp(no_dir_fd, tmp_path):
@@ -106,7 +102,7 @@ def test_without_dir_fd_refuses_a_symlinked_parent(no_dir_fd, tmp_path):
     linked = tmp_path / "linked"
     make_symlink(real, linked)
 
-    with pytest.raises(CHART.ChartError, match="Refusing symlink output directory"):
+    with pytest.raises(CHART.ChartError, match="Refusing linked or non-directory output directory"):
         CHART.write_text_atomic_no_follow(linked / "chart.html", TEXT)
     assert list(real.iterdir()) == []
 
@@ -114,7 +110,7 @@ def test_without_dir_fd_refuses_a_symlinked_parent(no_dir_fd, tmp_path):
 def test_without_dir_fd_refuses_a_reparse_point_parent(no_dir_fd, tmp_path, monkeypatch):
     _patch_parent_lstat(monkeypatch, tmp_path, 1, st_file_attributes=REPARSE)
 
-    with pytest.raises(CHART.ChartError, match="Refusing symlink output directory"):
+    with pytest.raises(CHART.ChartError, match="Refusing linked or non-directory output directory"):
         CHART.write_text_atomic_no_follow(tmp_path / "chart.html", TEXT)
     assert list(tmp_path.iterdir()) == []
 
