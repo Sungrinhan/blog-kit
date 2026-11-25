@@ -4,3 +4,4 @@ tests/test_chart_windows_write.py
 tests/test_load_untrusted_root_relative.py
 tests/test_render_self_closing.py
 tests/test_render_svg_attrs.py
+tests/test_chart_render_integration.py

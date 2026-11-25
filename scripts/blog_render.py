@@ -220,6 +220,8 @@ svg{max-width:100%;height:auto}
 figure{margin:0 0 1.75rem}
 figure svg{display:block;margin:0 auto}
 figcaption{color:var(--muted);font-size:.875rem;margin-top:.5rem}
+.chart-muted{fill:#4b5563}
+@media (prefers-color-scheme:dark){.chart-muted{fill:#d1d5db}}
 .table-wrap{max-width:100%;overflow-x:auto;margin:0 0 1.5rem;-webkit-overflow-scrolling:touch}
 table{border-collapse:collapse;width:100%;font-size:.95rem}
 th,td{border:1px solid var(--border);padding:.5rem .75rem;text-align:left;vertical-align:top}

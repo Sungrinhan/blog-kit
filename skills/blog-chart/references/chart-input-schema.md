@@ -109,8 +109,9 @@ needs a non-empty `values` object. A chart with too many groups for the fixed
 A `<figure class="blog-chart">` containing a transparent inline SVG
 (`viewBox="0 0 560 380"`, `role="img"`, `aria-labelledby`, `<title>`, `<desc>`)
 and a `<figcaption>` with the source. Colors come from a fixed palette, text uses
-`currentColor`, and muted text uses `--chart-muted` for contrast in light and
-dark mode. Place the markup inside the article where the claim it supports sits.
+`currentColor`, and muted text carries the `chart-muted` class (light `fill`
+attribute, dark-mode color from the page CSS) for contrast in light and dark
+mode. Place the markup inside the article where the claim it supports sits.
 
 ## Choosing and repeating types
 
