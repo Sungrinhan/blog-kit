@@ -50,6 +50,7 @@ M2C_WHOLE_FILE_EDITS = frozenset({
 # Each WR ticket adds the upstream files it patches here and to FORK.md.
 WR_WHOLE_FILE_EDITS = frozenset({
     ".github/workflows/ci.yml",
+    "CHANGELOG.md",
     "scripts/blog_preflight.py",
     "scripts/blog_render.py",
     "scripts/load_untrusted_root.py",
