@@ -4,22 +4,19 @@ tests/fixtures/wr_acceptance/read-cache-p99.md holds a chart straight from the
 chart generator (self-closing tags as generated) with value labels added by
 hand, a table whose cells end in `{...}`, inline `tags` and
 `author_same_as` arrays, and the new keys `site_url` and `author_url`. It
-renders through the real renderer; the HTML is checked for the fixes, Gate 5
-runs without a browser, and Gate 3 runs in Chromium (the ubuntu CI test job;
-skipped without it): it must pass with no hidden text and a consistent
-JSON-LD.
+renders through the real renderer (with the golden draft's hero); the HTML is
+checked for the fixes, Gate 5 runs without a browser, and Gate 3 runs in
+Chromium (the ubuntu CI test job; skipped without it): it must pass with no
+hidden text and a consistent JSON-LD in every viewport.
 """
 
 from __future__ import annotations
 
-import json
 import re
-import shutil
-from pathlib import Path
 
 import pytest
-from gate_support import MINIMAL_PDF, PREFLIGHT, RENDERER, ROOT, offline_probes, require_browser  # noqa: F401
-from render_support import END, START, element_tree
+from gate_support import PREFLIGHT, ROOT, golden_draft, offline_probes, page_viewports, require_browser  # noqa: F401
+from render_support import END, START, element_tree, jsonld_blocks
 
 FIXTURE = ROOT / "tests" / "fixtures" / "wr_acceptance"
 SLUG = "read-cache-p99"
@@ -27,20 +24,12 @@ HAND_LABELS = ("420", "180", "310", "150", "260", "240")
 
 
 @pytest.fixture
-def draft(tmp_path: Path) -> Path:
-    target = tmp_path / "draft"
-    shutil.copytree(FIXTURE, target)
-    RENDERER._render_html(target / f"{SLUG}.md", target, "hero.webp")
-    (target / f"{SLUG}.pdf").write_bytes(MINIMAL_PDF)
-    return target
+def draft(tmp_path):
+    return golden_draft(tmp_path, fixture=FIXTURE, slug=SLUG)
 
 
-def _page(draft: Path) -> str:
+def _page(draft) -> str:
     return (draft / f"{SLUG}.html").read_text(encoding="utf-8")
-
-
-def _blocks(page: str) -> list[dict]:
-    return [json.loads(b) for b in re.findall(r'<script type="application/ld\+json">(.*?)</script>', page, re.S)]
 
 
 def test_fixture_source_keeps_the_generator_output_as_is():
@@ -62,7 +51,7 @@ def test_rendered_fixture_carries_every_fix(draft):
     assert 'aria-labelledby="p99-latency-before-and-after-caching-title' in body
     for cell in ("{hit}", "{warm}", "{external}"):
         assert cell in body, cell
-    post, crumbs = _blocks(page)
+    post, crumbs = jsonld_blocks(page)
     assert post["keywords"] == "performance, caching, latency"
     assert post["author"]["url"] == "https://notes.example.org/dev-notes/about/"
     assert len(post["author"]["sameAs"]) == 2
@@ -72,7 +61,7 @@ def test_rendered_fixture_carries_every_fix(draft):
     assert crumbs["@type"] == "BreadcrumbList"
     assert 'Published at <a href="https://notes.example.org/dev-notes/"' in page
     assert 'fetchpriority="high"' in page
-    assert re.search(r'<p class="kicker">Performance</p>', page)
+    assert '<p class="kicker">Performance</p>' in page
 
 
 def test_fixture_passes_gate_5(draft):
@@ -84,6 +73,9 @@ def test_fixture_passes_gate_3(draft):
     require_browser()
     result = PREFLIGHT.gate_3_visual_verification(draft, SLUG)
     assert result["passed"], result["violations"]
-    for viewport in result["per_viewport"].values():
-        assert viewport["result"]["hiddenText"]["chars"] == 0
+    viewports = page_viewports(result)
+    assert {"desktop", "mobile"} <= set(viewports), set(viewports)
+    for name, page in viewports.items():
+        assert page["hiddenText"]["chars"] == 0, name
+        assert page["jsonLdVisibleConsistent"], (name, page.get("jsonLdConsistencyMismatches"))
     assert not any("not rendered" in w for w in result["warnings"])

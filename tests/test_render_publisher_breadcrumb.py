@@ -18,14 +18,13 @@ import json
 import re
 
 from gate_support import PREFLIGHT, SLUG, golden_draft, offline_probes, require_browser  # noqa: F401
-from render_support import render_page
+from render_support import jsonld_blocks, render_page
 
 BODY = "Body paragraph.\n"
 SITE = "https://sungrin.example.io/dev-notes/"
 
 
-def _blocks(page: str) -> list[dict]:
-    return [json.loads(b) for b in re.findall(r'<script type="application/ld\+json">(.*?)</script>', page, re.S)]
+_blocks = jsonld_blocks
 
 
 def _by_type(page: str, kind: str) -> list[dict]:

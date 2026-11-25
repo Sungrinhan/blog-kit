@@ -7,6 +7,8 @@ markers, so tests check only the CLI's outside behaviour.
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import sys
 from html.parser import HTMLParser
@@ -52,6 +54,11 @@ def render_body(tmp_path: Path, body: str, slug: str = "fixture", extra_frontmat
     """Render and return only the body HTML between the bs-body markers."""
     page = render_page(tmp_path, body, slug, extra_frontmatter)
     return page[page.index(START) + len(START):page.rindex(END)]
+
+
+def jsonld_blocks(page: str) -> list[dict]:
+    """Every JSON-LD block of a rendered page, in document order."""
+    return [json.loads(b) for b in re.findall(r'<script type="application/ld\+json">(.*?)</script>', page, re.S)]
 
 
 VOID_TAGS = {"br", "hr", "img"}
