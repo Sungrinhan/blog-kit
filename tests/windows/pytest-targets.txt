@@ -7,3 +7,4 @@ tests/test_render_svg_attrs.py
 tests/test_chart_render_integration.py
 tests/test_render_frontmatter_markdown.py
 tests/test_render_site_author.py
+tests/test_render_publisher_breadcrumb.py

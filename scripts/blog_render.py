@@ -23,7 +23,9 @@ an empty or non-string item, or one that is neither form, fails the render):
     link, og:url, the og:image and JSON-LD image URLs, the default site name
     and, without site_url, the footer site link), site_url (absolute http(s)
     URL, no user info, query or fragment, trailing slash kept: the footer
-    "Published at" link), author_url (http(s) URL: JSON-LD author.url),
+    "Published at" link, a JSON-LD publisher Organization named site_name or
+    the site_url host, and a second JSON-LD block, a BreadcrumbList of the
+    site then the post; neither appears without site_url), author_url (http(s) URL: JSON-LD author.url),
     author_same_as (list of http(s) URLs, block or inline: JSON-LD
     author.sameAs); a bad URL in any of these fails the render,
     site_name (default: host of canonical),
@@ -184,7 +186,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta name="twitter:title" content="{title_escaped}">
 <meta name="twitter:description" content="{description_escaped}">
 <meta name="twitter:image" content="{og_image}">
-<script type="application/ld+json">{json_ld}</script>
+<script type="application/ld+json">{json_ld}</script>{breadcrumb_json_ld}
 <style>{css}</style>
 </head>
 <body>
@@ -579,6 +581,37 @@ def _author_json_ld(fm: dict) -> dict:
     return author
 
 
+def _publisher_name(fm: dict) -> str:
+    """Fork (WR-10): site_name, else the site_url host."""
+    return str(fm.get("site_name") or "").strip() or urllib.parse.urlsplit(fm["site_url"]).hostname or ""
+
+
+def _json_for_script(data: dict) -> str:
+    """Fork (WR-10): JSON safe inside <script>, as in _build_json_ld."""
+    return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+
+
+def _build_breadcrumb_json_ld(fm: dict) -> str:
+    """Fork (WR-10): a second JSON-LD block, site then post, only with site_url.
+
+    Without a canonical the post item has no `item` URL.
+    """
+    if not fm.get("site_url"):
+        return ""
+    post = {"@type": "ListItem", "position": 2, "name": fm.get("title", "")}
+    if fm.get("canonical"):
+        post["item"] = fm["canonical"]
+    data = {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": _publisher_name(fm), "item": fm["site_url"]},
+            post,
+        ],
+    }
+    return '\n<script type="application/ld+json">' + _json_for_script(data) + "</script>"
+
+
 def _build_json_ld(fm: dict, word_count: int, og_image_url: str) -> str:
     data = {
         "@context": "https://schema.org",
@@ -595,6 +628,9 @@ def _build_json_ld(fm: dict, word_count: int, og_image_url: str) -> str:
     }
     if fm.get("canonical"):
         data["mainEntityOfPage"] = {"@type": "WebPage", "@id": fm["canonical"]}
+    if fm.get("site_url"):
+        # Fork (WR-10): a publisher only when the site is named by site_url.
+        data["publisher"] = {"@type": "Organization", "name": _publisher_name(fm), "url": fm["site_url"]}
     # HTML-safe JSON encoding: escape "</" as "<\/" so an attacker who controls
     # a frontmatter value (e.g. title) cannot inject a literal "</script>" that
     # would break out of the surrounding <script type="application/ld+json">
@@ -985,6 +1021,7 @@ def _render_html(md_path: Path, out_dir: Path, hero_filename: str) -> Path:
         body_sha256=hashlib.sha256(body_html.encode("utf-8")).hexdigest(),
         site_url_or_dash=_safe_attr(site_url or "#"),
         json_ld=_build_json_ld(fm, word_count, og_image),
+        breadcrumb_json_ld=_build_breadcrumb_json_ld(fm),
         css=CSS,
     )
 
