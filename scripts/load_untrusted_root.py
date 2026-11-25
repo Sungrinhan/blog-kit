@@ -211,10 +211,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--root",
-        default=None,
+        default=".",
         help=(
             "Project root that must contain the requested file (default: cwd). "
-            "A relative path is resolved against it."
+            "A relative PATH argument is resolved against this root."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON metadata plus fenced text")
@@ -227,10 +227,7 @@ def main() -> int:
     # Do NOT resolve() the path: resolve() silently follows symlinks, which
     # defeats the symlink-refusal in _read_safely. Use the as-given path.
     path = Path(args.path)
-    root = Path(args.root if args.root is not None else ".").resolve()
-    # Fork (WR-04): with --root, a relative path is resolved against the root,
-    # not cwd, so the same command works from any directory.
-    base = root if args.root is not None else Path.cwd()
+    root = Path(args.root).resolve()
     if args.allow_any_basename and os.environ.get("CLAUDE_BLOG_TEST_ALLOW_ANY_BASENAME") != "1":
         print("Error: --allow-any-basename is only available when CLAUDE_BLOG_TEST_ALLOW_ANY_BASENAME=1", file=sys.stderr)
         return 2
@@ -238,7 +235,9 @@ def main() -> int:
         print(f"Error: basename {path.name!r} not in allowlist {sorted(ALLOWED_BASENAMES)}.", file=sys.stderr)
         return 2
     try:
-        candidate = path if path.is_absolute() else base / path
+        # Fork (WR-04): resolve a relative path against --root, not cwd, so
+        # the same command works from any directory (default root is cwd).
+        candidate = path if path.is_absolute() else root / path
         confined = candidate.parent.resolve() / candidate.name
         confined.relative_to(root)
     except ValueError:
