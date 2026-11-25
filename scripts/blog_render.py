@@ -572,8 +572,8 @@ def _author_json_ld(fm: dict) -> dict:
     """Fork (WR-09): the Person, with url and sameAs when frontmatter sets them."""
     author: dict = {"@type": "Person", "name": fm.get("author", "")}
     if fm.get("author_url"):
-        author["url"] = str(fm["author_url"]).strip()
-    same_as = [str(item).strip() for item in _same_as_values(fm)]
+        author["url"] = fm["author_url"]
+    same_as = _same_as_values(fm)
     if same_as:
         author["sameAs"] = same_as
     return author
@@ -851,12 +851,15 @@ def _check_http_url(key: str, value: object, site: bool = False) -> str:
     try:
         parts = urllib.parse.urlsplit(text)
         hostname = parts.hostname
+        parts.port  # urlsplit checks the port only when it is read
     except ValueError:
         hostname = None
         parts = None
+    if re.search(r"[\s\\\x00-\x1f\x7f]", text):
+        raise ValueError(f"frontmatter {key} must not contain whitespace, control characters or backslashes: {text!r}")
     if parts is None or parts.scheme.lower() not in {"http", "https"} or not hostname:
         raise ValueError(f"frontmatter {key} must be an absolute http(s) URL with a host: {text!r}")
-    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+    if parts.username is not None or parts.password is not None:
         raise ValueError(f"frontmatter {key} must not carry user info: {text!r}")
     if site and (parts.query or parts.fragment or text.endswith(("?", "#"))):
         raise ValueError(f"frontmatter {key} must not carry a query or fragment: {text!r}")
@@ -864,7 +867,7 @@ def _check_http_url(key: str, value: object, site: bool = False) -> str:
 
 
 def _same_as_values(fm: dict) -> list[str]:
-    """`author_same_as` as a list: a block or inline list, or one string."""
+    """Fork (WR-09): `author_same_as` as a list: a block or inline list, or one string."""
     value = fm.get("author_same_as")
     if not value:
         return []
@@ -872,13 +875,17 @@ def _same_as_values(fm: dict) -> list[str]:
 
 
 def _validate_url_keys(fm: dict) -> None:
-    """Fork (WR-09): check the URL-valued keys before anything is written."""
+    """Fork (WR-09): check the URL-valued keys before anything is written and
+    store the checked values back, so every writer uses exactly those."""
+    for key in ("site_url", "author_url"):
+        if key in fm and (isinstance(fm[key], list) or not str(fm[key]).strip()):
+            raise ValueError(f"frontmatter {key} is set but empty or a list; give one URL or drop the key")
     if fm.get("site_url"):
-        _check_http_url("site_url", fm["site_url"], site=True)
+        fm["site_url"] = _check_http_url("site_url", fm["site_url"], site=True)
     if fm.get("author_url"):
-        _check_http_url("author_url", fm["author_url"])
-    for item in _same_as_values(fm):
-        _check_http_url("author_same_as", item)
+        fm["author_url"] = _check_http_url("author_url", fm["author_url"])
+    same_as = [_check_http_url("author_same_as", item) for item in _same_as_values(fm)]
+    fm["author_same_as"] = same_as
 
 
 def _warn_if_stdlib_fallback_is_lossy(body: str) -> None:
@@ -945,7 +952,7 @@ def _render_html(md_path: Path, out_dir: Path, hero_filename: str) -> Path:
     site_name = fm.get("site_name") or (canonical.split("/")[2] if canonical.startswith("http") else "")
     # Fork (WR-09): frontmatter site_url (validated) wins for the footer link,
     # so a project page such as /dev-notes/ is not sent to the account root.
-    site_url = str(fm.get("site_url") or "").strip() or (
+    site_url = fm.get("site_url") or (
         "/".join(canonical.split("/")[:3]) if canonical.startswith("http") else ""
     )
     og_image = canonical.rstrip("/") + "/" + hero_filename if canonical else hero_filename

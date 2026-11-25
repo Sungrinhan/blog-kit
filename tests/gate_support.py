@@ -4,7 +4,9 @@
 strict gates), appends frontmatter lines and markdown, renders it through the
 real renderer and adds a minimal PDF, so a test can run Gate 3 or Gate 5 on
 it. `offline_probes` is a fixture: import it into a test module to give every
-test no network and a private review-state directory. `require_browser`
+test no network and a private review-state directory (an import, not
+tests/conftest.py, because that file is upstream and the fork does not edit
+it; importing modules mark it `# noqa: F401`). `require_browser`
 skips when Patchright or its Chromium is missing (the ubuntu CI test job
 installs both).
 """
