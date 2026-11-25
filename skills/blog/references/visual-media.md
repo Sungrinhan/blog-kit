@@ -328,7 +328,7 @@ For text inside colored elements: `fill="white"` with `fontWeight="800"`.
 
   <!-- Chart content -->
 
-  <text x="280" y="372" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.35">
+  <text x="280" y="372" text-anchor="middle" font-size="10" class="chart-muted" fill="#4b5563">
     Source: Source Name (Year)
   </text>
 </svg>
@@ -348,7 +348,7 @@ For text inside colored elements: `fill="white"` with `fontWeight="800"`.
 
   {/* Chart content */}
 
-  <text x="280" y="372" textAnchor="middle" fontSize="10" fill="currentColor" opacity="0.35">
+  <text x="280" y="372" textAnchor="middle" fontSize="10" className="chart-muted" fill="#4b5563">
     Source: Source Name (Year)
   </text>
 </svg>

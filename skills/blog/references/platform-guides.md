@@ -90,7 +90,7 @@ cause compilation errors.
     <text x="380" y="165" textAnchor="middle" fontSize="14" fontWeight="800" fill="white">
       ~2.4%
     </text>
-    <text x="280" y="372" textAnchor="middle" fontSize="10" fill="currentColor" opacity="0.35">
+    <text x="280" y="372" textAnchor="middle" fontSize="10" className="chart-muted" fill="#4b5563">
       Source: Seer Interactive (Apr 2026)
     </text>
   </svg>

@@ -12,44 +12,13 @@ Tests render a real markdown file through the CLI and check the HTML body.
 
 from __future__ import annotations
 
-from html.parser import HTMLParser
-
+from render_support import VOID_TAGS as VOID
+from render_support import element_tree as _tree
 from render_support import render_body
-
-VOID = {"br", "hr", "img"}
 
 
 def _render_body(tmp_path, body: str) -> str:
     return render_body(tmp_path, body, slug="self-closing")
-
-
-class _Tree(HTMLParser):
-    """Record each element's parent tag, as a browser-like parser nests them."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.stack: list[str] = []
-        self.parents: set[tuple[str, str | None]] = set()
-
-    def handle_starttag(self, tag, attrs):
-        self.parents.add((tag, self.stack[-1] if self.stack else None))
-        if tag not in VOID:
-            self.stack.append(tag)
-
-    def handle_startendtag(self, tag, attrs):
-        raise AssertionError(f"self-closing tag left in output: {tag}")
-
-    def handle_endtag(self, tag):
-        assert self.stack and self.stack[-1] == tag, f"unbalanced </{tag}> in {self.stack}"
-        self.stack.pop()
-
-
-def _tree(html: str) -> _Tree:
-    tree = _Tree()
-    tree.feed(html)
-    tree.close()
-    assert tree.stack == [], f"unclosed elements: {tree.stack}"
-    return tree
 
 
 def test_consecutive_svg_self_closing_siblings_do_not_nest(tmp_path: Path):
