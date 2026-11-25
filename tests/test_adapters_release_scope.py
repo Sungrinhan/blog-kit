@@ -56,6 +56,7 @@ WR_WHOLE_FILE_EDITS = frozenset({
     "skills/blog-chart/SKILL.md",
     "skills/blog-chart/references/chart-input-schema.md",
     "skills/blog-chart/scripts/generate_chart_svg.py",
+    "skills/blog/references/platform-guides.md",
     "skills/blog/references/visual-media.md",
     "tests/test_dependency_ci_workflow.py",
 })

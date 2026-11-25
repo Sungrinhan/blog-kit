@@ -14,22 +14,22 @@ muted class is present.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
-from collections import Counter
 import sys
-from html.parser import HTMLParser
+from collections import Counter
 from pathlib import Path
 
 import pytest
-from render_support import render_body, render_page
+from render_support import SCRIPT, element_tree, render_body, render_page
 
 ROOT = Path(__file__).resolve().parent.parent
 CHART = ROOT / "skills" / "blog-chart" / "scripts" / "generate_chart_svg.py"
-VOID = {"br", "hr", "img"}
 LEAF_SHAPES = {"line", "rect", "circle", "path", "polyline", "polygon"}
 DATA = [{"label": "Alpha", "value": 3}, {"label": "Beta", "value": 5}, {"label": "Gamma", "value": 2}]
+HAND_LABEL = '<text x="500" y="90" font-size="11" font-weight="700" fill="currentColor">142 ms</text>'
 TYPES = ["horizontal_bar", "grouped_bar", "donut", "line", "lollipop", "area", "radar"]
 
 
@@ -59,22 +59,6 @@ def _generate(tmp_path: Path, chart_type: str) -> str:
     return result.stdout.decode("utf-8")
 
 
-class _Tree(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.stack: list[str] = []
-        self.parents: set[tuple[str, str | None]] = set()
-
-    def handle_starttag(self, tag, attrs):
-        self.parents.add((tag, self.stack[-1] if self.stack else None))
-        if tag not in VOID:
-            self.stack.append(tag)
-
-    def handle_endtag(self, tag):
-        assert self.stack and self.stack[-1] == tag, f"unbalanced </{tag}> in {self.stack}"
-        self.stack.pop()
-
-
 @pytest.mark.parametrize("chart_type", TYPES)
 def test_generator_marks_muted_text_with_a_class_and_no_css_variable(tmp_path: Path, chart_type: str):
     figure = _generate(tmp_path, chart_type)
@@ -86,23 +70,26 @@ def test_generator_marks_muted_text_with_a_class_and_no_css_variable(tmp_path: P
 @pytest.mark.parametrize("chart_type", TYPES)
 def test_generated_chart_renders_unnested_with_attributes_and_muted_class(tmp_path: Path, chart_type: str):
     figure = _generate(tmp_path, chart_type)
+    # A value label added by hand, as authors do (the generator draws none).
+    figure = figure.replace("</svg>", HAND_LABEL + "</svg>", 1)
     body = render_body(tmp_path, f"Intro paragraph.\n\n{figure}\n\nAfter the chart.\n", slug="chart")
-    tree = _Tree()
-    tree.feed(body)
-    tree.close()
-    assert tree.stack == [], tree.stack
+    tree = element_tree(body)
     assert not any(parent in LEAF_SHAPES for _, parent in tree.parents), tree.parents
     assert ("p", None) in tree.parents
     assert 'class="chart-muted" fill="#4b5563"' in body
+    assert HAND_LABEL in body
     assert "Source: Example source" in body
     assert 'aria-labelledby="' in body
     assert "<style" not in body and "style=" not in body
-    # Every attribute the generator emits, except the stripped style=, survives.
-    generated = Counter(n.lower() for n in re.findall(r'\s([A-Za-z][\w:-]*)="', figure))
-    rendered = Counter(n.lower() for n in re.findall(r'\s([A-Za-z][\w:-]*)="', body))
-    del generated["style"]
-    missing = {name: count for name, count in generated.items() if rendered[name] < count}
+    # Every attribute the generator emits, name and value, except the stripped
+    # style=, survives (grid-line opacity="0.08" included).
+    pairs = re.compile(r'\s([A-Za-z][\w:-]*)="([^"]*)"')
+    generated = Counter((n.lower(), v) for n, v in pairs.findall(figure) if n.lower() != "style")
+    rendered = Counter((n.lower(), v) for n, v in pairs.findall(body))
+    missing = {pair: count for pair, count in generated.items() if rendered[pair] < count}
     assert not missing, missing
+    if chart_type not in {"donut", "radar"}:
+        assert 'opacity="0.08"' in body, "grid lines lost their opacity"
 
 
 def test_page_css_colors_the_muted_class_in_light_and_dark(tmp_path: Path):
@@ -111,3 +98,15 @@ def test_page_css_colors_the_muted_class_in_light_and_dark(tmp_path: Path):
     assert ".chart-muted{fill:#4b5563}" in css
     dark = css[css.index("@media (prefers-color-scheme:dark)"):]
     assert ".chart-muted{fill:#d1d5db}" in dark
+
+
+def test_generator_and_renderer_agree_on_muted_colors():
+    """The two modules install separately, so their colors are compared here."""
+    spec = importlib.util.spec_from_file_location("chart_colors", CHART)
+    chart = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(chart)
+    spec = importlib.util.spec_from_file_location("render_colors", SCRIPT)
+    renderer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(renderer)
+    assert f".chart-muted{{fill:{chart.MUTED_LIGHT}}}" in renderer.CSS
+    assert f"@media (prefers-color-scheme:dark){{.chart-muted{{fill:{chart.MUTED_DARK}}}}}" in renderer.CSS

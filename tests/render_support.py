@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,3 +47,39 @@ def render_body(tmp_path: Path, body: str, slug: str = "fixture", extra_frontmat
     """Render and return only the body HTML between the bs-body markers."""
     page = render_page(tmp_path, body, slug, extra_frontmatter)
     return page[page.index(START) + len(START):page.rindex(END)]
+
+
+VOID_TAGS = {"br", "hr", "img"}
+
+
+class ElementTree(HTMLParser):
+    """Record each element's parent as a browser-like parser nests them.
+
+    Fails on an unbalanced end tag or a self-closing tag, which the
+    renderer's sanitized output never contains."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stack: list[str] = []
+        self.parents: set[tuple[str, str | None]] = set()
+
+    def handle_starttag(self, tag, attrs):
+        self.parents.add((tag, self.stack[-1] if self.stack else None))
+        if tag not in VOID_TAGS:
+            self.stack.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        raise AssertionError(f"self-closing tag left in output: {tag}")
+
+    def handle_endtag(self, tag):
+        assert self.stack and self.stack[-1] == tag, f"unbalanced </{tag}> in {self.stack}"
+        self.stack.pop()
+
+
+def element_tree(html: str) -> ElementTree:
+    """Parse body HTML; fail if any element is left unclosed."""
+    tree = ElementTree()
+    tree.feed(html)
+    tree.close()
+    assert tree.stack == [], f"unclosed elements: {tree.stack}"
+    return tree
