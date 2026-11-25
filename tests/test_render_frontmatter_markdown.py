@@ -27,6 +27,12 @@ from render_support import render, render_body, render_page
 BODY = "Body paragraph.\n"
 
 
+def _require_markdown():
+    """attr_list and the extra members exist only in python-markdown; without
+    it the renderer uses its stdlib fallback and these tests prove nothing."""
+    pytest.importorskip("markdown", reason="python-markdown not installed (CI installs .[dev])")
+
+
 def _jsonld(page: str) -> dict:
     for block in re.findall(r'<script type="application/ld\+json">(.*?)</script>', page, re.S):
         data = json.loads(block)
@@ -61,19 +67,30 @@ def test_inline_tags_match_block_list(tmp_path):
 @pytest.mark.parametrize(
     "line",
     ['tags: ["seo", ""]', "tags: [seo, , speed]", 'tags: ["seo", 3]', 'tags: ["seo", "spe"ed"]', "tags: [a, b'c]",
-     "tags: ['seo', 'speed']"],
+     "tags: ['seo', 'speed']", "tags: [[a, b]]", "tags: [a] and [b]", "tags: [seo, speed",'tags: ["seo"]  # note',
+     'author_same_as: ["https://example.com/a", ""]', "author_same_as: [https://a.example, ]"],
 )
-def test_bad_inline_tags_fail_the_render(tmp_path, line):
+def test_bad_inline_lists_fail_the_render(tmp_path, line):
     (tmp_path / "out").mkdir()
     result = render(tmp_path / "out", BODY, slug="tags", extra_frontmatter=line + "\n")
     assert result.returncode != 0
-    assert "frontmatter tags" in result.stderr
+    assert f"frontmatter {line.split(':')[0]}" in result.stderr
     assert not (tmp_path / "out" / "tags.html").exists()
 
 
 def test_other_keys_keep_bracketed_value_as_string(tmp_path):
     page = render_page(tmp_path, BODY, slug="other", extra_frontmatter="kicker: [Draft] notes\nsite_name: [Lab]\n")
     assert _kicker(page) == "[Draft] notes"
+    assert '<meta property="og:site_name" content="[Lab]">' in page
+
+
+@pytest.mark.parametrize(
+    "line",
+    ['author_same_as: ["https://a.example/x", "https://b.example/y"]', "author_same_as: [https://a.example/x]"],
+)
+def test_inline_author_same_as_is_accepted(tmp_path, line):
+    result = render(tmp_path, BODY, slug="same", extra_frontmatter=line + "\n")
+    assert result.returncode == 0, result.stderr
 
 
 def test_string_tags_unchanged(tmp_path):
@@ -82,6 +99,7 @@ def test_string_tags_unchanged(tmp_path):
 
 
 def test_trailing_braces_in_table_cell_stay(tmp_path):
+    _require_markdown()
     table = "| 항목 | 상태 |\n|---|---|\n| 초안 | 검토 중 {리뷰} |\n| 제목 {draft} | ok |\n"
     body = render_body(tmp_path, table, slug="braces")
     assert "검토 중 {리뷰}" in body
@@ -89,12 +107,14 @@ def test_trailing_braces_in_table_cell_stay(tmp_path):
 
 
 def test_heading_braces_stay_text(tmp_path):
+    _require_markdown()
     body = render_body(tmp_path, "## Plan {#custom .cls}\n\nText.\n", slug="heading")
     assert "Plan {#custom .cls}" in body
     assert 'id="custom"' not in body
 
 
 def test_other_extra_syntax_still_renders(tmp_path):
+    _require_markdown()
     source = (
         "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
         "```python\nprint('hi')\n```\n\n"

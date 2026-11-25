@@ -132,6 +132,15 @@ SVG_PRESENTATION_ATTRS = frozenset({
     "text-anchor", "stroke-linecap", "stroke-linejoin",
 })
 _UNSAFE_SVG_VALUE_PARTS = ("javascript:", "url(", "expression(", "<", "\\")
+# Fork (WR-08): list-valued keys that also accept an inline array
+# (`tags: ["a", "b"]` or `tags: [a, b]`). Other keys keep a bracketed value as
+# a plain string.
+INLINE_LIST_KEYS = frozenset({"tags", "author_same_as"})
+# Fork (WR-08): the members of python-markdown's `extra` minus `attr_list`,
+# which ate trailing `{...}` text in table cells and headings as attributes.
+MARKDOWN_EXTENSIONS = (
+    "abbr", "def_list", "fenced_code", "footnotes", "md_in_html", "tables", "sane_lists",
+)
 
 # The renderer wraps the converted and sanitized markdown body in these comment
 # markers and records the sha256 of the UTF-8 bytes strictly between them in
@@ -391,19 +400,18 @@ def _parse_frontmatter(raw: str) -> tuple[dict, str]:
             if not value:
                 current_list_key = key
                 fm[key] = []
-            elif key in INLINE_LIST_KEYS and value.startswith("[") and value.endswith("]"):
+            elif key in INLINE_LIST_KEYS and value.startswith("["):
                 current_list_key = None
+                if not value.endswith("]"):
+                    raise ValueError(
+                        f"frontmatter {key}: inline array must end with ']' "
+                        f"(a trailing comment is not supported): {value!r}"
+                    )
                 fm[key] = _parse_inline_list(key, value)
             else:
                 current_list_key = None
                 fm[key] = value.strip('"').strip("'")
     return fm, body
-
-
-# Fork (WR-08): list-valued keys that also accept an inline array
-# (`tags: ["a", "b"]` or `tags: [a, b]`). Other keys keep a bracketed value as
-# a plain string.
-INLINE_LIST_KEYS = frozenset({"tags", "author_same_as"})
 
 
 def _parse_inline_list(key: str, value: str) -> list[str]:
@@ -420,10 +428,10 @@ def _parse_inline_list(key: str, value: str) -> list[str]:
         if not inner.strip():
             return []
         parsed = [item.strip() for item in inner.split(",")]
-        if any('"' in item or "'" in item for item in parsed):
+        if any(char in item for item in parsed for char in "\"'[]"):
             raise ValueError(
                 f"frontmatter {key}: inline array {value!r} is neither a JSON string array "
-                f"nor simple comma-separated items without quotes"
+                f"nor simple comma-separated items without quotes or brackets"
             )
     if not all(isinstance(item, str) for item in parsed):
         raise ValueError(f"frontmatter {key}: inline array items must be strings: {value!r}")
@@ -432,20 +440,13 @@ def _parse_inline_list(key: str, value: str) -> list[str]:
     return [item.strip() for item in parsed]
 
 
-# Fork (WR-08): the members of python-markdown's `extra` minus `attr_list`,
-# which ate trailing `{...}` text in table cells and headings as attributes.
-MARKDOWN_EXTENSIONS = [
-    "abbr", "def_list", "fenced_code", "footnotes", "md_in_html", "tables", "sane_lists",
-]
-
-
 def _markdown_to_html(body: str) -> str:
     """Convert markdown body to HTML. Uses python-markdown if installed,
     else a minimal stdlib subset (ATX headings, paragraphs, code, links,
     emphasis, lists, blockquotes, hr, images)."""
     try:
         import markdown  # type: ignore
-        return _sanitize_body_html(markdown.markdown(body, extensions=MARKDOWN_EXTENSIONS))
+        return _sanitize_body_html(markdown.markdown(body, extensions=list(MARKDOWN_EXTENSIONS)))
     except ImportError:
         return _sanitize_body_html(_stdlib_markdown(body))
 
