@@ -99,6 +99,9 @@ produce. The markdown file stem is the artifact stem (`S.html`, `S.pdf`) unless
 | `canonical` | Yes in practice | `<link rel="canonical">`, `og:url`, JSON-LD `mainEntityOfPage`, and the base that relative image URLs resolve against; Gate 5 reports its absence first |
 | `slug` | Optional | Artifact stem, overriding the file stem. If you set it, name the markdown file `<slug>.md`: Gate 2 needs the `.md`, `.html` and `.pdf` to share one name |
 | `site_name` | Optional | Footer and `og:site_name`; derived from the canonical host when absent |
+| `site_url` | Optional absolute http(s) URL (no user info, query or fragment; trailing slash kept) | Footer "Published at" link; the canonical origin when absent |
+| `author_url` | Optional http(s) URL | JSON-LD `author.url` |
+| `author_same_as` | Optional list of http(s) URLs (block list or inline array) | JSON-LD `author.sameAs` |
 | `lang` | Optional (default `en`) | `<html lang>`, JSON-LD `inLanguage` |
 | `og_image_alt` | Recommended | `alt` of the hero image and `og:image:alt` (defaults to the title) |
 | `tags` | Optional list: block list or inline array (`["a", "b"]` or `[a, b]`; an empty, non-string or quoted-but-not-JSON item fails the render) | JSON-LD `keywords`, the kicker |
