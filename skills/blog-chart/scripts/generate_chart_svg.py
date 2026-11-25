@@ -604,7 +604,7 @@ def dir_fd_writes_supported() -> bool:
     return all(func in os.supports_dir_fd for func in (os.open, os.rename, os.unlink))
 
 
-def is_link_stat(st: os.stat_result) -> bool:
+def is_link_or_reparse_point(st: os.stat_result) -> bool:
     """Return True for a symlink or a Windows reparse point (fork)."""
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & reparse)
@@ -614,7 +614,7 @@ def check_parent_unchanged(parent: Path, expected: os.stat_result, moment: str) 
     """Fail unless parent is still the same real directory (fork)."""
     current = os.lstat(parent)
     if (
-        is_link_stat(current)
+        is_link_or_reparse_point(current)
         or not stat.S_ISDIR(current.st_mode)
         or (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino)
     ):
@@ -631,8 +631,8 @@ def write_text_atomic_by_identity(path: Path, text: str) -> None:
     """
     parent = path.parent
     before = os.lstat(parent)
-    if is_link_stat(before) or not stat.S_ISDIR(before.st_mode):
-        raise ChartError(f"Refusing symlink output directory: {parent}")
+    if is_link_or_reparse_point(before) or not stat.S_ISDIR(before.st_mode):
+        raise ChartError(f"Refusing linked or non-directory output directory: {parent}")
     tmp_path = parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
     file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):

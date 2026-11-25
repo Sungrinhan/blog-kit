@@ -8,9 +8,21 @@ so a runner without the capability cannot hide the link tests behind skips.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def fake_stat(real, **changes):
+    """Copy the stat fields the Windows branches read, with some replaced."""
+    fields = {name: getattr(real, name) for name in ("st_mode", "st_dev", "st_ino", "st_size")}
+    fields["st_file_attributes"] = getattr(real, "st_file_attributes", 0)
+    fields.update(changes)
+    return SimpleNamespace(**fields)
 
 
 def make_symlink(target: Path, link: Path) -> None:
