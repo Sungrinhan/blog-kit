@@ -79,10 +79,14 @@ blog-kit은 업스트림 [AgriciDaniel/claude-blog](https://github.com/AgriciDan
 - `skills/blog-chart/scripts/generate_chart_svg.py`: `os.open`·`os.replace`·`os.unlink`가 `dir_fd`를 받지 못하는 플랫폼(Windows)의 `--output` 쓰기 분기. 부모 폴더가 심볼릭 링크나 reparse point면 거부하고, 같은 폴더에 임시 파일을 배타 생성한 뒤 교체 직전·직후 부모 `lstat` 장치·inode를 비교한다(직전이 다르면 교체하지 않고 실패, 직후가 다르면 실패 보고, 교체 전 실패면 임시 파일 삭제). CPython은 `os.supports_dir_fd`에 `os.replace` 대신 같은 `renameat`을 쓰는 `os.rename`만 올리므로 `rename`으로 판정한다. `--root` 경계 검사와 `dir_fd` 경로는 그대로. 파일 끝 줄바꿈을 `os.linesep`에서 LF로(POSIX는 같음. 대체 경로는 `O_BINARY`·`newline=""`로 변환 없이 쓰므로, Windows에서 본문은 LF인데 끝만 CRLF인 혼합 줄바꿈을 막음), stdout 차트 HTML은 콘솔 인코딩 대신 UTF-8·LF 바이트로 쓴다(`--json` 형식은 그대로). 보조 글자(부제, 출처 줄, donut 합계)는 SVG `style` 속성의 CSS 변수(`--chart-muted`) 대신 `chart-muted` 클래스와 밝은 `fill` 기본 색을 갖고, SVG 안 `<style>`의 다크 모드 규칙도 그 클래스로 바꾼다(렌더러가 본문의 `<style>`·`style=`를 지우므로 다크 색은 렌더러 페이지 CSS가 준다)
 - `scripts/blog_preflight.py`: Gate 3 숨은 텍스트 검사의 건너뛰는 선택자에 `svg title`, `svg desc`를 더한다(차트의 접근성 이름과 설명은 그려지지 않는 것이 정상). SVG 밖 숨은 텍스트 기준은 그대로
 - `scripts/load_untrusted_root.py`: `--root`를 주면 상대 경로를 cwd 대신 `--root` 기준으로 푼다(cwd가 어디든 같은 명령이 통하게). 그 뒤의 루트 포함 검사·파일명 허용 목록·심볼릭 링크 거부는 그대로, `--root` 없는 상대 경로(cwd 기준)와 절대 경로도 그대로
-- `skills/blog-chart/SKILL.md`, `skills/blog-chart/references/chart-input-schema.md`, `skills/blog/references/visual-media.md`, `skills/blog/references/platform-guides.md`: 차트 보조 글자 설명과 SVG 예시를 `--chart-muted` CSS 변수(또는 `opacity="0.35"`)에서 `chart-muted` 클래스와 밝은 `fill`로
+- `skills/blog-chart/SKILL.md`: 차트 보조 글자 설명과 SVG 예시를 `--chart-muted` CSS 변수(또는 `opacity="0.35"`)에서 `chart-muted` 클래스와 밝은 `fill`로
+- `skills/blog-chart/references/chart-input-schema.md`: 차트 보조 글자 설명과 SVG 예시를 `--chart-muted` CSS 변수(또는 `opacity="0.35"`)에서 `chart-muted` 클래스와 밝은 `fill`로
+- `skills/blog/references/platform-guides.md`: 차트 보조 글자 설명과 SVG 예시를 `--chart-muted` CSS 변수(또는 `opacity="0.35"`)에서 `chart-muted` 클래스와 밝은 `fill`로
+- `skills/blog/references/visual-media.md`: 차트 보조 글자 설명과 SVG 예시를 `--chart-muted` CSS 변수(또는 `opacity="0.35"`)에서 `chart-muted` 클래스와 밝은 `fill`로
 - `scripts/validate_public_release.py`: 업스트림 author 상수와 포크 배포 상수 분리, 버전 대응 규칙 `python_version()`, 독립 설치 스크립트 표면을 필수 검사에서 제외(아래 "릴리스 검사 범위 밖")
 - `skills/blog/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`. 라우팅 절에 라우팅하지 않는 포크 스킬(`blog-doctor`, `blog-memo`, `blog-interview`, `blog-learn`) 한 문장
-- `skills/blog-write/SKILL.md`, `skills/blog/references/blog-delivery-contract.md`: frontmatter `tags`가 블록 리스트와 인라인 배열(`["a", "b"]`, `[a, b]`)을 받고 빈 항목·JSON 아닌 따옴표는 렌더 실패라는 설명
+- `skills/blog/references/blog-delivery-contract.md`: frontmatter `tags`가 블록 리스트와 인라인 배열(`["a", "b"]`, `[a, b]`)을 받고 빈 항목·JSON 아닌 따옴표는 렌더 실패라는 설명
+- `skills/blog-write/SKILL.md`: frontmatter `tags`가 블록 리스트와 인라인 배열(`["a", "b"]`, `[a, b]`)을 받고 빈 항목·JSON 아닌 따옴표는 렌더 실패라는 설명
 - `skills/blog-audio/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
 - `skills/blog-cluster/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
 - `skills/blog-flow/SKILL.md`: 메타데이터 버전 `2.3.1-kit.N`
