@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
-import sys
 
 from gate_support import PREFLIGHT, SLUG, golden_draft, offline_probes, require_browser  # noqa: F401
-from render_support import SCRIPT, frontmatter, render_page
+from render_support import render_page
 
 BODY = "Body paragraph.\n"
 SITE = "https://sungrin.example.io/dev-notes/"
@@ -59,16 +57,9 @@ def test_site_url_adds_a_separate_breadcrumb_block(tmp_path):
 
 
 def test_breadcrumb_without_canonical_omits_the_post_item(tmp_path):
-    source_fm = frontmatter("nocanon").replace("canonical: https://example.com/blog/nocanon/\n", "")
-    source = tmp_path / "nocanon.md"
-    source.write_bytes((source_fm.replace("---\n", f"---\nsite_url: {SITE}\n", 1) + BODY).encode("utf-8"))
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--md", str(source), "--out-dir", str(tmp_path), "--pdf-engine", "none"],
-        capture_output=True, text=True, encoding="utf-8",
-    )
-    assert result.returncode == 0, result.stderr
-    page = (tmp_path / "nocanon.html").read_text(encoding="utf-8")
+    page = render_page(tmp_path, BODY, slug="nocanon", extra_frontmatter=f"site_url: {SITE}\n", canonical=False)
     (crumbs,) = _by_type(page, "BreadcrumbList")
+    assert crumbs["itemListElement"][0]["name"] == "sungrin.example.io"
     assert crumbs["itemListElement"][1] == {"@type": "ListItem", "position": 2, "name": "Fixture Post"}
 
 

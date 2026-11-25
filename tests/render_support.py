@@ -18,27 +18,32 @@ START = "<!--bs-body:start-->"
 END = "<!--bs-body:end-->"
 
 
-def frontmatter(slug: str, extra: str = "") -> str:
+def frontmatter(slug: str, extra: str = "", canonical: bool = True) -> str:
+    canonical_line = f"canonical: https://example.com/blog/{slug}/\n" if canonical else ""
     return (
         f"---\ntitle: Fixture Post\ndescription: A short description of the post.\n"
-        f"date: 2026-11-25\nauthor: Alex Rivera\ncanonical: https://example.com/blog/{slug}/\n"
+        f"date: 2026-11-25\nauthor: Alex Rivera\n{canonical_line}"
         f"slug: {slug}\n{extra}---\n"
     )
 
 
-def render(tmp_path: Path, body: str, slug: str = "fixture", extra_frontmatter: str = "") -> subprocess.CompletedProcess[str]:
+def render(
+    tmp_path: Path, body: str, slug: str = "fixture", extra_frontmatter: str = "", canonical: bool = True,
+) -> subprocess.CompletedProcess[str]:
     """Render `body` under fixed frontmatter; return the finished process."""
     source = tmp_path / f"{slug}.md"
-    source.write_bytes((frontmatter(slug, extra_frontmatter) + body).encode("utf-8"))
+    source.write_bytes((frontmatter(slug, extra_frontmatter, canonical) + body).encode("utf-8"))
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--md", str(source), "--out-dir", str(tmp_path), "--pdf-engine", "none"],
         capture_output=True, text=True, encoding="utf-8",
     )
 
 
-def render_page(tmp_path: Path, body: str, slug: str = "fixture", extra_frontmatter: str = "") -> str:
+def render_page(
+    tmp_path: Path, body: str, slug: str = "fixture", extra_frontmatter: str = "", canonical: bool = True,
+) -> str:
     """Render and return the whole HTML page; fail the test on a render error."""
-    result = render(tmp_path, body, slug, extra_frontmatter)
+    result = render(tmp_path, body, slug, extra_frontmatter, canonical)
     assert result.returncode == 0, result.stderr
     return (tmp_path / f"{slug}.html").read_text(encoding="utf-8")
 
