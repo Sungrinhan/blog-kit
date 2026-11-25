@@ -514,6 +514,8 @@ def _read_md_bytes_safely(path: Path) -> bytes:
     O_NOFOLLOW pattern used by scripts/load_untrusted_root.py for project-
     root files so a caller cannot redirect the renderer at an attacker-
     chosen target via symlink."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        return _read_md_bytes_by_identity(path)
     try:
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as e:
@@ -525,6 +527,46 @@ def _read_md_bytes_safely(path: Path) -> bytes:
         if not stat.S_ISREG(st.st_mode):
             raise ValueError(f"not a regular file: {path}")
         if st.st_size > MAX_MD_BYTES:
+            raise ValueError(f"source markdown exceeds {MAX_MD_BYTES} bytes")
+        data = os.read(fd, MAX_MD_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_MD_BYTES:
+        raise ValueError(f"source markdown exceeds {MAX_MD_BYTES} bytes")
+    return data
+
+
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _is_link_or_reparse_point(st) -> bool:
+    attributes = getattr(st, "st_file_attributes", 0)
+    return stat.S_ISLNK(st.st_mode) or bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _read_md_bytes_by_identity(path: Path) -> bytes:
+    """Fork (Windows): the no-O_NOFOLLOW read. Refuse a symlink or reparse
+    point at lstat before open, then require the lstat-before, fstat and
+    lstat-after device/inode pairs to match so a swap between the check and
+    the open is refused too. Regular-file check and size cap as above."""
+    refusal = f"refusing to follow symlink: {path}"
+    before = os.lstat(path)
+    if _is_link_or_reparse_point(before):
+        raise ValueError(refusal)
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"not a regular file: {path}")
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(fd)
+        after = os.lstat(path)
+        if _is_link_or_reparse_point(after):
+            raise ValueError(refusal)
+        identities = {(st.st_dev, st.st_ino) for st in (before, opened, after)}
+        if len(identities) != 1:
+            raise ValueError(f"{refusal} (file changed while opening)")
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError(f"not a regular file: {path}")
+        if opened.st_size > MAX_MD_BYTES:
             raise ValueError(f"source markdown exceeds {MAX_MD_BYTES} bytes")
         data = os.read(fd, MAX_MD_BYTES + 1)
     finally:
