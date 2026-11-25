@@ -15,33 +15,31 @@ Tests render a real markdown file through the CLI and check the HTML body.
 
 from __future__ import annotations
 
-import subprocess
-import sys
-from pathlib import Path
+import importlib.util
 
 import pytest
+from render_support import SCRIPT, render_body
 
-ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "blog_render.py"
-FRONTMATTER = (
-    "---\ntitle: Svg Attrs Post\ndescription: A short description of the post.\n"
-    "date: 2026-11-25\nauthor: Alex Rivera\ncanonical: https://example.com/blog/svg-attrs/\n"
-    "slug: svg-attrs\n---\n"
-)
-START = "<!--bs-body:start-->"
-END = "<!--bs-body:end-->"
+SPEC = importlib.util.spec_from_file_location("render_svg_attrs", SCRIPT)
+RENDER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(RENDER)
+SVG_TAGS = ("svg", "path", "rect", "circle", "line", "polyline", "polygon", "text", "tspan")
+NON_PRESENTATION = {
+    "viewbox", "width", "height", "xmlns", "x", "y", "dx", "dy", "x1", "x2", "y1", "y2",
+    "cx", "cy", "r", "rx", "ry", "d", "points",
+}
 
 
-def _render_body(tmp_path: Path, svg: str) -> str:
-    source = tmp_path / "svg-attrs.md"
-    source.write_bytes((FRONTMATTER + f"<figure>\n{svg}\n</figure>\n\nAfter.\n").encode("utf-8"))
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--md", str(source), "--out-dir", str(tmp_path), "--pdf-engine", "none"],
-        capture_output=True, text=True, encoding="utf-8",
-    )
-    assert result.returncode == 0, result.stderr
-    page = (tmp_path / "svg-attrs.html").read_text(encoding="utf-8")
-    return page[page.index(START) + len(START):page.rindex(END)]
+def _render_body(tmp_path, svg: str) -> str:
+    return render_body(tmp_path, f"<figure>\n{svg}\n</figure>\n\nAfter.\n", slug="svg-attrs")
+
+
+def test_every_allowed_svg_presentation_attribute_is_value_checked():
+    """A presentation attribute added to an SVG allowlist entry but not to
+    SVG_PRESENTATION_ATTRS would skip the value check (fail open)."""
+    for tag in SVG_TAGS:
+        for name in RENDER.ALLOWED_ATTRS[tag] - NON_PRESENTATION:
+            assert name in RENDER.SVG_PRESENTATION_ATTRS, (tag, name)
 
 
 def test_chart_presentation_and_aria_attributes_survive(tmp_path: Path):
@@ -86,31 +84,44 @@ def test_style_element_and_style_attribute_are_still_removed(tmp_path: Path):
     assert ">Label</text>" in body
 
 
+DANGEROUS_VALUES = [
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    "java\tscript:alert(1)",
+    " java script : alert(1)",
+    "url(#evil)",
+    "URL (https://example.com/x.svg#a)",
+    "&#117;rl(#evil)",
+    "&amp;#117;rl(#evil)",
+    "expression(alert(1))",
+    "a<b",
+    "\\75 rl(#evil)",
+]
+
+
 @pytest.mark.parametrize(
-    "value",
+    ("attr", "tag"),
     [
-        "javascript:alert(1)",
-        "JaVaScRiPt:alert(1)",
-        "java\tscript:alert(1)",
-        " java script : alert(1)",
-        "url(#evil)",
-        "URL (https://example.com/x.svg#a)",
-        "&#117;rl(#evil)",
-        "&amp;#117;rl(#evil)",
-        "expression(alert(1))",
-        "a<b",
-        "\\75 rl(#evil)",
+        ("fill", "svg"), ("stroke", "svg"), ("fill", "text"), ("fill", "tspan"),
+        ("font-size", "text"), ("font-weight", "text"), ("text-anchor", "text"),
+        ("opacity", "line"), ("stroke", "line"), ("stroke-width", "line"),
+        ("stroke-linecap", "polyline"), ("stroke-linejoin", "polyline"),
     ],
 )
-@pytest.mark.parametrize("attr", ["fill", "stroke", "opacity", "font-weight", "stroke-linecap"])
-def test_dangerous_presentation_values_are_dropped(tmp_path: Path, attr: str, value: str):
-    escaped = value.replace("<", "&lt;").replace('"', "&quot;")
-    tag = "polyline" if attr == "stroke-linecap" else "text"
-    close = "</polyline>" if tag == "polyline" else "T</text>"
-    svg = f'<svg viewBox="0 0 10 10"><{tag} x="1" y="1" points="0,0 1,1" {attr}="{escaped}">{close}</svg>'
+def test_dangerous_presentation_values_are_dropped(tmp_path, attr: str, tag: str):
+    """Every variant of every dangerous value goes in one render per attribute.
+
+    One safe value rides along, so the attribute is proven allowed on that
+    element and is removed by the value check, not by the allowlist."""
+    variants = ["1"] + [v.replace("<", "&lt;").replace('"', "&quot;") for v in DANGEROUS_VALUES]
+    if tag == "svg":
+        svg = "\n".join(f'<svg viewBox="0 0 10 10" {attr}="{v}"></svg>' for v in variants)
+    else:
+        inner = "".join(f'<{tag} {attr}="{v}">T</{tag}>' for v in variants)
+        svg = f'<svg viewBox="0 0 10 10">{inner}</svg>'
     body = _render_body(tmp_path, svg)
-    assert f"{attr}=" not in body, body
-    assert f"<{tag}" in body
+    assert body.count(f'{attr}="') == 1 and f'{attr}="1"' in body, body
+    assert body.count(f"<{tag}") >= len(variants)
 
 
 def test_safe_values_with_css_variables_are_kept(tmp_path: Path):

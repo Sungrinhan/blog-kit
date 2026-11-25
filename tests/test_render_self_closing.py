@@ -12,33 +12,15 @@ Tests render a real markdown file through the CLI and check the HTML body.
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from html.parser import HTMLParser
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "blog_render.py"
-FRONTMATTER = (
-    "---\ntitle: Self Closing Post\ndescription: A short description of the post.\n"
-    "date: 2026-11-25\nauthor: Alex Rivera\ncanonical: https://example.com/blog/self-closing/\n"
-    "slug: self-closing\n---\n"
-)
-START = "<!--bs-body:start-->"
-END = "<!--bs-body:end-->"
+from render_support import render_body
+
 VOID = {"br", "hr", "img"}
 
 
-def _render_body(tmp_path: Path, body: str) -> str:
-    source = tmp_path / "self-closing.md"
-    source.write_bytes((FRONTMATTER + body).encode("utf-8"))
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--md", str(source), "--out-dir", str(tmp_path), "--pdf-engine", "none"],
-        capture_output=True, text=True, encoding="utf-8",
-    )
-    assert result.returncode == 0, result.stderr
-    page = (tmp_path / "self-closing.html").read_text(encoding="utf-8")
-    return page[page.index(START) + len(START):page.rindex(END)]
+def _render_body(tmp_path, body: str) -> str:
+    return render_body(tmp_path, body, slug="self-closing")
 
 
 class _Tree(HTMLParser):
